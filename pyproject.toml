@@ -1,0 +1,12 @@
+[project]
+name = "rvsh-bot"
+version = "0.1.0"
+description = "Exam, PDF & Quiz Telegram bot (spec: prompt_v4.md)"
+requires-python = ">=3.12"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+    "samples: needs the owner's sample files in the project root (skipped when absent)",
+]

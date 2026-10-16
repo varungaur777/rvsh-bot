@@ -1,0 +1,38 @@
+# Only code goes into the image — never secrets, data or the owner's samples.
+.git
+.gitignore
+.gitattributes
+.env
+config.env
+*.session
+*.session-journal
+downloads/
+dist/
+data/
+_db/
+logs/
+*.log
+JSONs/
+maths JSONs/
+sample_pdfs/
+unused-dir/
+downloaded_exams mhts (edqt)/
+*.mht
+*.mhtml
+*.pdf
+*.txt
+!requirements.txt
+!requirements-dev.txt
+prompt*.md
+tests/
+docs/
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+.vscode/
+.idea/
+.claude/

@@ -1,0 +1,39 @@
+# secrets & local config
+.env
+config.env
+*.session
+*.session-journal
+fetch_token.txt
+
+# owner's sample data (personal data of candidates) — referenced by tests, never committed
+*.mht
+*.mhtml
+*.pdf
+downloaded_exams mhts (edqt)/
+*links*.txt
+tcs unfltered links.txt
+
+# runtime data
+downloads/
+data/
+_db/
+logs/
+*.log
+
+# python / tooling
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+tests/_artifacts/
+
+# owner's quiz JSON collection (data, not code)
+JSONs/
+maths JSONs/
+unknown_errors.txt
+
+# deploy zips
+dist/

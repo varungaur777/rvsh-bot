@@ -1,0 +1,421 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Quiz</title>
+<!--__TG__-->
+<style>
+@font-face{font-family:NDeva;src:url(__FONT__) format("truetype");unicode-range:U+0900-097F,U+1CD0-1CFF,U+A8E0-A8FF,U+200C-200D,U+25CC}
+:root{--bg:#f3f5f9;--card:#ffffff;--text:#14181f;--muted:#5f6b7a;--line:#d8dfe9;--accent:#2b6cb0;--accent-t:#ffffff;
+--ok:#2e7d32;--bad:#c62828;--mark:#6a1b9a;--na:#a3adb9;--soft:#eef2f8;--shadow:0 1px 3px rgba(20,30,50,.08)}
+@media (prefers-color-scheme:dark){body.offline{--bg:#12161c;--card:#1b2129;--text:#e8edf3;--muted:#9aa7b6;--line:#2c3540;--soft:#222a34}}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;padding:0}
+body{font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans",NDeva,"Noto Sans Devanagari",sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
+button{font:inherit;cursor:pointer;border:1px solid var(--line);background:var(--card);color:var(--text);border-radius:10px;padding:9px 12px}
+button.p{background:var(--accent);color:var(--accent-t);border-color:var(--accent);font-weight:600}
+button.g{background:var(--ok);color:#fff;border-color:var(--ok);font-weight:600}
+button.r{background:var(--bad);color:#fff;border-color:var(--bad)}
+button.on{outline:2px solid var(--accent);outline-offset:-2px;font-weight:600}
+button:disabled{opacity:.45;cursor:default}
+.wrap{max-width:860px;margin:0 auto;padding:14px 14px 110px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:16px;box-shadow:var(--shadow);margin-bottom:12px}
+h1{font-size:20px;margin:0 0 4px;color:var(--accent);line-height:1.3}
+.muted{color:var(--muted);font-size:13.5px}
+.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:8px 0}
+.lbl{font-weight:600;margin:14px 0 6px;font-size:14px}
+.chips button{padding:7px 12px}
+.num{display:inline-flex;align-items:center;gap:6px}
+.num b{min-width:44px;text-align:center}
+.top{position:sticky;top:0;z-index:5;background:var(--card);border-bottom:1px solid var(--line);display:flex;align-items:center;gap:8px;padding:8px 12px}
+.top .t{flex:1;min-width:0;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:15px}
+.timer{font-variant-numeric:tabular-nums;font-weight:700;padding:5px 10px;border-radius:9px;background:var(--soft)}
+.timer.low{background:var(--bad);color:#fff}
+.tabs{display:flex;gap:6px;overflow-x:auto;padding:8px 12px;background:var(--bg);position:sticky;top:51px;z-index:4}
+.tabs button{white-space:nowrap;padding:6px 10px;font-size:13.5px}
+.tabs button.cur{background:var(--accent);color:var(--accent-t);border-color:var(--accent)}
+.qhead{display:flex;justify-content:space-between;gap:8px;align-items:center;font-size:14px;color:var(--muted);margin-bottom:8px}
+.qhead b{color:var(--text);font-size:16px}
+.qtext{font-weight:600;font-size:17px;line-height:1.55;word-wrap:break-word}
+.opts{margin-top:14px;display:flex;flex-direction:column;gap:9px}
+.opt{display:flex;gap:10px;align-items:flex-start;border:1.5px solid var(--line);border-radius:12px;padding:11px 12px;cursor:pointer;background:var(--card)}
+.opt .L{flex:none;width:28px;height:28px;border-radius:50%;border:1.5px solid var(--accent);color:var(--accent);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:14px}
+.opt .c{flex:1;min-width:0;word-wrap:break-word}
+.expl{margin-top:10px;padding:10px 12px;border-radius:12px;background:var(--soft);line-height:1.55;word-wrap:break-word}
+.opt.sel{border-color:var(--accent);background:var(--soft)}
+.opt.sel .L{background:var(--accent);color:var(--accent-t)}
+.opt.right{border-color:var(--ok);background:rgba(46,125,50,.09)}
+.opt.right .L{background:var(--ok);border-color:var(--ok);color:#fff}
+.opt.wrong{border-color:var(--bad);background:rgba(198,40,40,.08)}
+.opt.wrong .L{background:var(--bad);border-color:var(--bad);color:#fff}
+.ib{display:block;max-width:100%;overflow-x:auto;margin:4px 0;-webkit-overflow-scrolling:touch}
+.ib img{max-width:none;height:auto;display:block}
+.ii img{height:auto;vertical-align:middle;max-width:100%}
+img[data-z]{cursor:zoom-in}
+.broken{display:block;font-size:12px;color:var(--muted);font-style:italic}
+.bar{position:fixed;left:0;right:0;bottom:0;z-index:6;background:var(--card);border-top:1px solid var(--line);padding:9px 10px calc(9px + env(safe-area-inset-bottom));display:flex;gap:7px;justify-content:center}
+.bar button{flex:1;max-width:200px;padding:10px 6px;font-size:14px}
+.pal{position:fixed;inset:0;z-index:20;background:rgba(0,0,0,.35);display:none}
+.pal.show{display:block}
+.pal .in{position:absolute;right:0;top:0;bottom:0;width:min(360px,92vw);background:var(--card);padding:14px;overflow-y:auto;box-shadow:-4px 0 18px rgba(0,0,0,.2)}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(42px,1fr));gap:7px;margin:10px 0}
+.grid button{padding:8px 0;font-weight:600;font-size:13.5px;border-radius:9px}
+.s-na{background:var(--card);color:var(--text)}
+.s-nv{background:var(--soft);color:var(--muted);border-style:dashed}
+.s-un{background:var(--bad);color:#fff;border-color:var(--bad)}
+.s-an{background:var(--ok);color:#fff;border-color:var(--ok)}
+.s-mk{background:var(--mark);color:#fff;border-color:var(--mark)}
+.s-am{background:var(--mark);color:#fff;border-color:var(--ok);box-shadow:inset 0 0 0 3px var(--ok)}
+.grid button.cur{outline:2px solid var(--accent);outline-offset:1px}
+.legend{display:grid;grid-template-columns:1fr 1fr;gap:5px;font-size:12.5px}
+.legend span i{display:inline-block;width:14px;height:14px;border-radius:4px;vertical-align:-2px;margin-right:5px;border:1px solid var(--line)}
+.modal{position:fixed;inset:0;z-index:30;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;padding:16px}
+.modal .in{background:var(--card);border-radius:16px;padding:18px;max-width:420px;width:100%}
+.zoom{position:fixed;inset:0;z-index:40;background:rgba(0,0,0,.88);overflow:auto;display:flex;align-items:flex-start;justify-content:center;padding:14px}
+.zoom img{width:auto;max-width:none;min-width:100%;background:#fff;border-radius:6px}
+.big{font-size:34px;font-weight:800;color:var(--accent)}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:10px}
+.stats div{background:var(--soft);border-radius:12px;padding:8px;text-align:center}
+.stats b{display:block;font-size:20px}
+table{width:100%;border-collapse:collapse;font-size:14px}
+th,td{padding:7px 5px;border-bottom:1px solid var(--line);text-align:center}
+th:first-child,td:first-child{text-align:left}
+.rv{border:1px solid var(--line);border-radius:12px;margin:8px 0;overflow:hidden}
+.rv .h{display:flex;gap:8px;align-items:center;padding:10px 12px;cursor:pointer;font-size:14px}
+.rv .h .tag{flex:none;width:22px;text-align:center}
+.rv .h .s{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--muted)}
+.rv .b{padding:0 12px 12px;display:none}
+.rv.open .b{display:block}
+.toast{position:fixed;left:50%;bottom:84px;transform:translateX(-50%);background:#222;color:#fff;padding:9px 14px;border-radius:10px;font-size:14px;z-index:50;opacity:0;transition:opacity .2s;pointer-events:none;max-width:90vw;text-align:center}
+.toast.show{opacity:.95}
+.brand{text-align:center;margin:18px 0 6px;font-weight:700}
+.brand a{color:var(--accent);text-decoration:none}
+.err{color:var(--bad);font-weight:600}
+</style>
+</head>
+<body>
+<div id="app"><div class="wrap"><div class="card">Loading…</div></div></div>
+<div class="toast" id="toast"></div>
+<script>
+"use strict";
+const MODE = "__MODE__";
+let DATA = /*__DATA__*/null;
+const BRAND = "__BRAND__", BRAND_URL = "__BRAND_URL__";
+const tg = (window.Telegram && window.Telegram.WebApp) || null;
+const LET = "ABCDEFGHIJ";
+const NEG = [[0, "No minus"], [0.25, "−¼"], [0.3333, "−⅓"], [0.5, "−½"]];
+let S = null, TOKEN = null, ticker = null, EXPL = {};
+document.body.classList.add(MODE);
+
+function el(tag, attrs, ...kids) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (k === "class") e.className = v;
+    else if (k === "html") e.innerHTML = v;
+    else if (k.startsWith("on")) e.addEventListener(k.slice(2), v);
+    else if (v !== false && v != null) e.setAttribute(k, v === true ? "" : v);
+  }
+  for (const k of kids.flat()) if (k != null && k !== false) e.append(k.nodeType ? k : document.createTextNode(String(k)));
+  return e;
+}
+function toast(msg) { const t = document.getElementById("toast"); t.textContent = msg; t.classList.add("show"); clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove("show"), 2200); }
+function haptic(kind) { try { if (tg && tg.HapticFeedback) kind === "sel" ? tg.HapticFeedback.selectionChanged() : tg.HapticFeedback.notificationOccurred(kind); } catch (e) {} }
+function esc(s) { return String(s).replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c])); }
+function fmt(sec) { sec = Math.max(0, Math.round(sec)); const h = Math.floor(sec / 3600), m = Math.floor(sec % 3600 / 60), s = sec % 60; return (h ? h + ":" + String(m).padStart(2, "0") : m) + ":" + String(s).padStart(2, "0"); }
+function num(x) { return Math.round(x * 100) / 100; }
+
+function rich(m) {
+  return (m || "").replace(/<img id="([^"]+)"\s*\/>/g, (x, id) => {
+    const im = DATA.images[id];
+    if (!im) return "";
+    if (im.broken && !im.src) return '<span class="broken">[image could not be read]</span>';
+    const note = im.broken ? '<span class="broken">[the rest of this image could not be read]</span>' : "";
+    // a little wider than the screen → shrunk to fit (down to 65 %); much wider → kept readable, scrolls sideways
+    const w = im.w ? ` style="width:${im.w}px;max-width:max(100%,${Math.round(im.w * 0.65)}px)"` : "";
+    const inline = im.w && im.w <= 150;
+    return `<span class="${inline ? "ii" : "ib"}"><img src="${esc(im.src)}"${w} data-z="1" alt="" loading="lazy">${note}</span>`;
+  });
+}
+function content(q) { return q.lang[S.lang] || q.lang[Object.keys(q.lang)[0]]; }
+function all() { const out = []; DATA.sections.forEach((s, si) => s.q.forEach((q, i) => out.push({si, i, q, n: out.length + 1}))); return out; }
+function cur() { return DATA.sections[S.sec].q[S.i]; }
+
+// ------------------------------------------------------------------ theme / Telegram
+function theme() {
+  if (!tg) return;
+  try {
+    tg.ready(); tg.expand();
+    const p = tg.themeParams || {}, r = document.documentElement.style;
+    if (p.bg_color) { r.setProperty("--card", p.bg_color); }
+    if (p.secondary_bg_color) { r.setProperty("--bg", p.secondary_bg_color); r.setProperty("--soft", p.secondary_bg_color); }
+    if (p.text_color) r.setProperty("--text", p.text_color);
+    if (p.hint_color) { r.setProperty("--muted", p.hint_color); }
+    if (p.button_color) r.setProperty("--accent", p.button_color);
+    if (p.button_text_color) r.setProperty("--accent-t", p.button_text_color);
+    if (tg.colorScheme === "dark") r.setProperty("--line", "#3a4450");
+  } catch (e) {}
+}
+function backButton(on, fn) {
+  if (!tg || !tg.BackButton) return;
+  try { tg.BackButton.offClick(backButton._fn || (() => {})); } catch (e) {}
+  backButton._fn = fn;
+  if (on) { tg.BackButton.onClick(fn); tg.BackButton.show(); } else tg.BackButton.hide();
+}
+
+// ------------------------------------------------------------------ start screen
+function startScreen() {
+  const total = all().length, secs = DATA.sections.length;
+  const per = DATA.time_per_q || 30;
+  S = S || {lang: DATA.langs[0], plus: DATA.marking.plus || 1, neg: DATA.marking.neg || 0, timer: secs > 1 ? "section" : "total",
+            totalMin: Math.max(1, Math.ceil(total * per / 60)), secMin: Math.max(1, Math.ceil(total * per / 60 / secs))};
+  const app = document.getElementById("app");
+  const box = el("div", {class: "wrap"});
+  const head = el("div", {class: "card"}, el("h1", {}, DATA.title), DATA.meta_line ? el("div", {class: "muted"}, DATA.meta_line) : null,
+    el("div", {class: "row"}, el("span", {}, `🧩 ${total} questions`), secs > 1 ? el("span", {}, ` · 📚 ${secs} sections`) : null));
+  box.append(head);
+  const opts = el("div", {class: "card"});
+  if (DATA.langs.length > 1) {
+    opts.append(el("div", {class: "lbl"}, "🌐 Language"));
+    opts.append(el("div", {class: "row chips"}, DATA.langs.map(l => el("button", {class: S.lang === l ? "on" : "", onclick: () => { S.lang = l; startScreen(); }}, l === "hi" ? "हिन्दी" : "English"))));
+  }
+  opts.append(el("div", {class: "lbl"}, "📝 Marking"));
+  opts.append(el("div", {class: "row chips"}, [1, 2, 3].map(v => el("button", {class: S.plus === v ? "on" : "", onclick: () => { S.plus = v; startScreen(); }}, "+" + v))));
+  opts.append(el("div", {class: "row chips"}, NEG.map(([v, t]) => el("button", {class: Math.abs(S.neg - v) < 1e-3 ? "on" : "", onclick: () => { S.neg = v; startScreen(); }}, t))));
+  opts.append(el("div", {class: "lbl"}, "⏱ Timer"));
+  const kinds = [["total", "Whole quiz"], ...(secs > 1 ? [["section", "Each section"]] : []), ["none", "No timer"]];
+  opts.append(el("div", {class: "row chips"}, kinds.map(([k, t]) => el("button", {class: S.timer === k ? "on" : "", onclick: () => { S.timer = k; startScreen(); }}, t))));
+  if (S.timer !== "none") {
+    const key = S.timer === "total" ? "totalMin" : "secMin";
+    const step = d => () => { S[key] = Math.max(1, Math.min(600, S[key] + d)); startScreen(); };
+    opts.append(el("div", {class: "row num"}, el("button", {onclick: step(-5)}, "−5"), el("button", {onclick: step(-1)}, "−1"),
+      el("b", {}, `${S[key]} min`), el("button", {onclick: step(1)}, "+1"), el("button", {onclick: step(5)}, "+5"),
+      el("span", {class: "muted"}, S.timer === "section" ? "per section" : "in total")));
+    if (S.timer === "section") opts.append(el("div", {class: "muted"}, "A submitted section can't be opened again; the next one opens after you submit."));
+  }
+  box.append(opts);
+  box.append(el("button", {class: "p", style: "width:100%;padding:13px;font-size:17px", onclick: begin}, "▶ Start"));
+  if (BRAND) box.append(el("div", {class: "brand"}, BRAND_URL ? el("a", {href: BRAND_URL, target: "_blank"}, BRAND) : BRAND));
+  app.replaceChildren(box);
+  backButton(false);
+}
+
+// ------------------------------------------------------------------ exam
+function begin() {
+  Object.assign(S, {ans: {}, mark: {}, seen: {}, time: {}, sec: 0, i: 0, locked: {}, submitted: {}, done: false, started: Date.now(), qStart: Date.now()});
+  if (S.timer === "total") S.deadline = Date.now() + S.totalMin * 60000;
+  if (S.timer === "section") S.deadline = Date.now() + S.secMin * 60000;
+  if (tg) { try { tg.enableClosingConfirmation(); } catch (e) {} }
+  else window.onbeforeunload = () => S && !S.done ? "Leave the quiz?" : undefined;
+  clearInterval(ticker); ticker = setInterval(tick, 1000);
+  exam();
+}
+function leave() { const q = cur(); S.time[q.ref] = (S.time[q.ref] || 0) + (Date.now() - S.qStart); S.qStart = Date.now(); }
+function go(sec, i) {
+  if (S.timer === "section" && sec !== S.sec) return toast("Submit this section first.");
+  if (S.submitted[sec]) return toast("That section is submitted.");
+  leave(); S.sec = sec; S.i = i; S.qStart = Date.now(); exam(); window.scrollTo(0, 0);
+}
+function tick() {
+  if (!S || S.done) return;
+  const t = document.getElementById("timer");
+  if (S.timer === "none") { if (t) t.textContent = fmt((Date.now() - S.started) / 1000); return; }
+  const left = (S.deadline - Date.now()) / 1000;
+  if (t) { t.textContent = fmt(left); t.classList.toggle("low", left < 60); }
+  if (left <= 0) {
+    if (S.timer === "section" && S.sec < DATA.sections.length - 1) { toast("⏰ Time up — section submitted"); submitSection(true); }
+    else { toast("⏰ Time up"); finish(); }
+  }
+}
+function status(q) {
+  const a = S.ans[q.ref] != null, m = S.mark[q.ref];
+  if (a && m) return "s-am"; if (m) return "s-mk"; if (a) return "s-an"; if (S.seen[q.ref]) return "s-un"; return "s-nv";
+}
+function exam() {
+  const sec = DATA.sections[S.sec], q = cur(), c = content(q);
+  S.seen[q.ref] = true;
+  const app = document.getElementById("app");
+  const top = el("div", {class: "top"}, el("button", {onclick: palette, title: "Questions"}, "☰"), el("div", {class: "t"}, DATA.title),
+    DATA.langs.length > 1 ? el("button", {onclick: () => { S.lang = S.lang === "en" ? "hi" : "en"; exam(); }}, S.lang === "en" ? "हि" : "EN") : null,
+    el("span", {class: "timer", id: "timer"}, "…"));
+  const tabs = el("div", {class: "tabs"}, DATA.sections.map((s, si) => el("button", {
+    class: si === S.sec ? "cur" : "", disabled: (S.timer === "section" && si !== S.sec) || !!S.submitted[si],
+    onclick: () => go(si, 0)}, (S.submitted[si] ? "✓ " : "") + s.name)));
+  const opts = el("div", {class: "opts"}, c.o.map((o, k) => el("div", {class: "opt" + (S.ans[q.ref] === k ? " sel" : ""),
+    onclick: ev => { if (ev.target.closest("img[data-z]")) return; S.ans[q.ref] = k; haptic("sel"); exam(); }},
+    el("span", {class: "L"}, LET[k]), el("div", {class: "c", html: rich(o)}))));
+  const n = sec.q.length;
+  const body = el("div", {class: "wrap"}, el("div", {class: "card"},
+    el("div", {class: "qhead"}, el("span", {}, el("b", {}, `Question ${S.i + 1}`), ` of ${n}`), el("span", {}, q.no ? `Paper Q${q.no}` : "")),
+    el("div", {class: "qtext", html: rich(c.q)}), opts));
+  const last = S.i === n - 1;
+  const bar = el("div", {class: "bar"},
+    el("button", {disabled: S.i === 0 && (S.sec === 0 || S.timer === "section" || S.submitted[S.sec - 1]), onclick: prev}, "◀"),
+    el("button", {onclick: () => { delete S.ans[q.ref]; exam(); }}, "Clear"),
+    el("button", {onclick: () => { S.mark[q.ref] = !S.mark[q.ref]; next(); }}, S.mark[q.ref] ? "Unmark" : "Mark & Next"),
+    el("button", {class: "p", onclick: next}, last ? (S.timer === "section" || S.sec === DATA.sections.length - 1 ? "Submit…" : "Next section ▶") : "Save & Next ▶"));
+  app.replaceChildren(top, tabs, body, bar);
+  tick();
+  backButton(true, () => palette());
+}
+function prev() {
+  if (S.i > 0) return go(S.sec, S.i - 1);
+  if (S.sec > 0 && S.timer !== "section" && !S.submitted[S.sec - 1]) go(S.sec - 1, DATA.sections[S.sec - 1].q.length - 1);
+}
+function next() {
+  const n = DATA.sections[S.sec].q.length;
+  if (S.i < n - 1) return go(S.sec, S.i + 1);
+  if (S.timer !== "section" && S.sec < DATA.sections.length - 1) return go(S.sec + 1, 0);
+  confirmSubmit();
+}
+function palette() {
+  leave();
+  const sec = DATA.sections[S.sec];
+  const counts = {an: 0, un: 0, mk: 0, nv: 0};
+  sec.q.forEach(q => { const s = status(q); if (s === "s-an" || s === "s-am") counts.an++; else if (s === "s-un") counts.un++; else if (s === "s-nv") counts.nv++; if (s === "s-mk" || s === "s-am") counts.mk++; });
+  const close = () => { pal.remove(); S.qStart = Date.now(); backButton(true, () => palette()); };
+  const grid = el("div", {class: "grid"}, sec.q.map((q, i) => el("button", {class: status(q) + (i === S.i ? " cur" : ""), onclick: () => { pal.remove(); go(S.sec, i); }}, String(i + 1))));
+  const lastSec = S.sec === DATA.sections.length - 1;
+  const submit = S.timer === "section" && !lastSec
+    ? el("button", {class: "g", style: "width:100%", onclick: () => { pal.remove(); confirmSubmit(); }}, "Submit this section")
+    : el("button", {class: "g", style: "width:100%", onclick: () => { pal.remove(); confirmSubmit(); }}, "Submit quiz");
+  const pal = el("div", {class: "pal show", onclick: ev => { if (ev.target === pal) close(); }}, el("div", {class: "in"},
+    el("div", {class: "row", style: "justify-content:space-between;flex-wrap:nowrap"}, el("b", {style: "flex:1;min-width:0"}, sec.name), el("button", {onclick: close}, "✕")),
+    el("div", {class: "legend"},
+      el("span", {}, el("i", {class: "s-an"}), `Answered ${counts.an}`), el("span", {}, el("i", {class: "s-un"}), `Not answered ${counts.un}`),
+      el("span", {}, el("i", {class: "s-nv"}), `Not visited ${counts.nv}`), el("span", {}, el("i", {class: "s-mk"}), `Marked ${counts.mk}`)),
+    grid, submit));
+  document.body.append(pal);
+  backButton(true, close);
+}
+function confirmSubmit() {
+  leave();
+  const section = S.timer === "section" && S.sec < DATA.sections.length - 1;
+  const qs = section ? DATA.sections[S.sec].q : all().map(x => x.q);
+  const answered = qs.filter(q => S.ans[q.ref] != null).length;
+  const m = el("div", {class: "modal"}, el("div", {class: "in"},
+    el("h1", {}, section ? `Submit “${DATA.sections[S.sec].name}”?` : "Submit the quiz?"),
+    el("p", {}, `Answered ${answered} of ${qs.length}.`),
+    section ? el("p", {class: "muted"}, "You can't open this section again.") : null,
+    el("div", {class: "row"}, el("button", {onclick: () => { m.remove(); S.qStart = Date.now(); }}, "Keep going"),
+      el("button", {class: "g", onclick: () => { m.remove(); section ? submitSection(false) : finish(); }}, "Submit"))));
+  document.body.append(m);
+}
+function submitSection(auto) {
+  S.submitted[S.sec] = true;
+  if (S.sec >= DATA.sections.length - 1) return finish();
+  S.sec += 1; S.i = 0; S.qStart = Date.now();
+  if (S.timer === "section") S.deadline = Date.now() + S.secMin * 60000;
+  haptic("success"); exam(); window.scrollTo(0, 0);
+}
+
+// ------------------------------------------------------------------ result
+async function finish() {
+  if (S.done) return;
+  leave(); S.done = true; clearInterval(ticker);
+  if (tg) { try { tg.disableClosingConfirmation(); } catch (e) {} } else window.onbeforeunload = null;
+  let res;
+  if (MODE === "webapp") {
+    document.getElementById("app").replaceChildren(el("div", {class: "wrap"}, el("div", {class: "card"}, "⏳ Sending your answers…")));
+    try {
+      const r = await fetch("api/submit", {method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({token: TOKEN, answers: S.ans, times: S.time, lang: S.lang})});
+      res = await r.json();
+      if (!r.ok) throw new Error(res.error || r.status);
+    } catch (e) {
+      return document.getElementById("app").replaceChildren(el("div", {class: "wrap"}, el("div", {class: "card err"}, "Couldn't submit: " + e.message)));
+    }
+  } else {
+    res = {key: {}, sections: []};
+    all().forEach(({q}) => { res.key[q.ref] = q.a; });
+  }
+  result(res);
+}
+function result(res) {
+  const key = res.key || {};
+  if (res.expl) { EXPL = res.expl; Object.assign(DATA.images, res.expl_images || {}); }
+  const rows = DATA.sections.map(s => {
+    let r = 0, w = 0, k = 0;
+    s.q.forEach(q => { const a = S.ans[q.ref]; if (a == null) k++; else if (a === key[q.ref]) r++; else w++; });
+    return {name: s.name, total: s.q.length, r, w, k};
+  });
+  const R = rows.reduce((a, x) => a + x.r, 0), W = rows.reduce((a, x) => a + x.w, 0), K = rows.reduce((a, x) => a + x.k, 0), T = R + W + K;
+  const marks = num(R * S.plus - W * S.plus * S.neg), max = T * S.plus;
+  const spent = Object.values(S.time).reduce((a, b) => a + b, 0) / 1000;
+  const box = el("div", {class: "wrap"});
+  box.append(el("div", {class: "card"}, el("h1", {}, DATA.title), DATA.meta_line ? el("div", {class: "muted"}, DATA.meta_line) : null,
+    el("div", {class: "row"}, el("span", {class: "big"}, `${marks}`), el("span", {class: "muted"}, ` / ${max} marks`)),
+    el("div", {class: "stats"}, el("div", {}, el("b", {style: "color:var(--ok)"}, R), "Right"), el("div", {}, el("b", {style: "color:var(--bad)"}, W), "Wrong"),
+      el("div", {}, el("b", {}, K), "Skipped"), el("div", {}, el("b", {}, (R + W ? Math.round(R * 100 / (R + W)) : 0) + "%"), "Accuracy")),
+    el("div", {class: "muted", style: "margin-top:8px"}, `⏱ ${fmt(spent)} · marking +${S.plus} / ${S.neg ? "−" + num(S.neg * S.plus) : "no minus"}`),
+    res.ranked != null ? el("div", {style: "margin-top:8px;font-weight:600"}, res.ranked ? `🏆 Ranked attempt — #${res.rank} of ${res.of}` : "🔁 Practice attempt — not ranked" + (res.rank ? ` (your ranked place: #${res.rank} of ${res.of})` : "")) : null));
+  if (rows.length > 1) box.append(el("div", {class: "card"}, el("table", {}, el("tr", {}, el("th", {}, "Section"), el("th", {}, "✅"), el("th", {}, "❌"), el("th", {}, "⭕"), el("th", {}, "Marks")),
+    rows.map(x => el("tr", {}, el("td", {}, x.name), el("td", {}, x.r), el("td", {}, x.w), el("td", {}, x.k), el("td", {}, num(x.r * S.plus - x.w * S.plus * S.neg)))))));
+  const list = el("div", {});
+  const filt = el("div", {class: "row chips"});
+  const show = f => {
+    filt.querySelectorAll("button").forEach(b => b.classList.toggle("on", b.dataset.f === f));
+    list.replaceChildren(...all().filter(({q}) => { const a = S.ans[q.ref]; const st = a == null ? "k" : a === key[q.ref] ? "r" : "w"; return f === "all" || f === st; })
+      .map(({si, q, n}) => review(q, si, n, key)));
+  };
+  [["all", "All"], ["w", "❌ Wrong"], ["k", "⭕ Skipped"], ["r", "✅ Right"]].forEach(([f, t]) => filt.append(el("button", {"data-f": f, onclick: () => show(f)}, t)));
+  box.append(el("div", {class: "card"}, el("div", {class: "lbl", style: "margin-top:0"}, "📝 Review"), filt, list));
+  box.append(el("div", {class: "row"}, MODE === "webapp" && tg ? el("button", {class: "p", style: "flex:1", onclick: () => tg.close()}, "Close")
+    : el("button", {class: "p", style: "flex:1", onclick: () => startScreen()}, "↻ Try again")));
+  if (BRAND) box.append(el("div", {class: "brand"}, BRAND_URL ? el("a", {href: BRAND_URL, target: "_blank"}, BRAND) : BRAND));
+  document.getElementById("app").replaceChildren(box);
+  show(W ? "w" : "all");
+  backButton(false);
+  window.scrollTo(0, 0);
+}
+function review(q, si, n, key) {
+  const c = content(q), a = S.ans[q.ref], k = key[q.ref];
+  const tag = a == null ? "⭕" : a === k ? "✅" : "❌";
+  const plain = (c.q || "").replace(/<sup>(.*?)<\/sup>/g, "^$1").replace(/<sub>(.*?)<\/sub>/g, "_$1")
+    .replace(/<img[^>]*>/g, " 🖼 ").replace(/<[^>]+>/g, " ").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+  const box = el("div", {class: "rv"});
+  const head = el("div", {class: "h", onclick: () => box.classList.toggle("open")}, el("span", {class: "tag"}, tag),
+    el("b", {}, `Q${n}`), el("span", {class: "s"}, plain.trim()),
+    el("span", {class: "muted"}, `${a == null ? "—" : LET[a]} / ${k == null ? "?" : LET[k]} · ${fmt((S.time[q.ref] || 0) / 1000)}`));
+  const opts = el("div", {class: "opts"}, c.o.map((o, j) => el("div", {class: "opt" + (j === k ? " right" : j === a ? " wrong" : "")},
+    el("span", {class: "L"}, LET[j]), el("div", {class: "c", html: rich(o)}))));
+  const ex = c.e || (EXPL[q.ref] && (EXPL[q.ref][S.lang] || Object.values(EXPL[q.ref])[0])) || "";
+  box.append(head, el("div", {class: "b"}, el("div", {class: "muted"}, DATA.sections[si].name + (q.no && q.no !== n ? ` · Paper Q${q.no}` : "")),
+    el("div", {class: "qtext", html: rich(c.q)}), opts,
+    el("div", {class: "muted", style: "margin-top:6px"}, `Your answer: ${a == null ? "skipped" : LET[a]} · Correct: ${k == null ? "?" : LET[k]} · Time: ${fmt((S.time[q.ref] || 0) / 1000)}`),
+    ex ? el("div", {class: "expl"}, el("div", {class: "lbl", style: "margin-top:0"}, "💡 Explanation"), el("div", {html: rich(ex)})) : null));
+  return box;
+}
+
+// ------------------------------------------------------------------ zoom
+document.addEventListener("click", ev => {
+  const img = ev.target.closest && ev.target.closest("img[data-z]");
+  if (!img) return;
+  ev.stopPropagation();
+  const z = el("div", {class: "zoom", onclick: () => z.remove()}, el("img", {src: img.src, style: `width:${Math.max(img.naturalWidth * 2, 320)}px`}));
+  document.body.append(z);
+}, true);
+
+// ------------------------------------------------------------------ boot
+async function boot() {
+  theme();
+  if (MODE === "webapp") {
+    const id = new URLSearchParams(location.search).get("q") || (tg && tg.initDataUnsafe && tg.initDataUnsafe.start_param) || "";
+    try {
+      const r = await fetch("api/start", {method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({initData: tg ? tg.initData : "", quiz_id: id})});
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error || ("error " + r.status));
+      DATA = j.quiz; TOKEN = j.token;
+    } catch (e) {
+      return document.getElementById("app").replaceChildren(el("div", {class: "wrap"}, el("div", {class: "card err"}, "😕 " + e.message)));
+    }
+  }
+  if (!DATA) return;
+  document.title = DATA.title;
+  startScreen();
+}
+boot();
+</script>
+</body>
+</html>

@@ -1,0 +1,28 @@
+# Telegram (MTProto) — kurigram[fast] pulls TgCrypto; uvloop is installed only on non-Windows
+kurigram[fast]>=2.2.26
+uvloop>=0.21; sys_platform != "win32"
+
+# storage
+pymongo>=4.18          # AsyncMongoClient (Motor is deprecated)
+orjson>=3.10
+python-dotenv>=1.0
+
+# parsing & network
+lxml>=5.3
+aiohttp>=3.10
+curl_cffi>=0.11       # exam links fetched as Chrome (TLS/HTTP2 fingerprint), owner 2026-10-14
+
+# rendering (imported lazily in pool workers)
+pymupdf>=1.26         # Document.rewrite_images (render.compress)
+reportlab>=4.4
+rl_accel>=0.9  # ReportLab's C accelerators: result PDFs ~2.5× faster
+uharfbuzz>=0.45        # ReportLab text shaping for Devanagari
+weasyprint>=63         # original-format PDF only
+pillow>=11.0
+jinja2>=3.1            # HTML quiz template
+
+# OCR (built last) — tesserocr preferred where installable, pytesseract fallback
+pytesseract>=0.3.13
+
+# system
+psutil>=6.0

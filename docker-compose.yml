@@ -1,0 +1,22 @@
+# RVSH bot on a Linux server / VPS with Docker.
+#   1. mkdir -p data && cp .env data/.env      (the bot reads and /bot edits data/.env)
+#   2. docker compose up -d --build
+#   3. docker compose logs -f                  (stop: docker compose down — the bot stops gracefully)
+# Stop the bot on your PC first: only one copy may run (the instance lease makes a second one wait).
+services:
+  bot:
+    build: .
+    image: rvsh-bot
+    container_name: rvsh-bot
+    restart: unless-stopped
+    init: false            # tini is the image's entrypoint
+    stop_grace_period: 90s # running tasks get time to finish
+    volumes:
+      - ./data:/data       # .env, downloads/ (tasks, logs, sessions, JSON fallback DB, tunnel state)
+    # ports:               # only when WEBAPP_HOST=0.0.0.0 and your own HTTPS proxy serves the Web App
+    #   - "8080:8080"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

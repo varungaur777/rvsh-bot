@@ -1,0 +1,23 @@
+# systemd unit for the RVSH bot without Docker — deploy/install_ubuntu.sh fills in @USER@ and @DIR@ and installs it
+# as /etc/systemd/system/rvsh-bot.service.   Logs: journalctl -u rvsh-bot -f   (and <DOWNLOAD_ROOT>/logs/bot.log)
+[Unit]
+Description=RVSH Telegram bot
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=@USER@
+WorkingDirectory=@DIR@
+Environment=PYTHONUNBUFFERED=1
+ExecStart=@DIR@/.venv/bin/python -m bot
+# exit 3 = /update wrote new code: Restart=always starts the new code
+# SIGTERM = graceful stop (running tasks get time to finish); exit 2 = bad .env → no restart loop
+KillSignal=SIGTERM
+TimeoutStopSec=90
+Restart=always
+RestartSec=10
+RestartPreventExitStatus=2
+
+[Install]
+WantedBy=multi-user.target

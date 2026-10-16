@@ -1,0 +1,7 @@
+# development + tests (the bot itself needs only requirements.txt)
+-r requirements.txt
+
+# tests
+pytest>=8.3
+pytest-asyncio>=0.24
+playwright>=1.48         # tests/web only: the quiz page in the installed Edge / Chrome (never imported by the bot)
