@@ -20,6 +20,7 @@ from __future__ import annotations
 import base64
 import binascii
 import email
+import email.header
 import email.policy
 import re
 from dataclasses import dataclass, field
@@ -109,7 +110,7 @@ def load_mht(data: bytes, hints: Hints | None = None) -> ExamSource:
             if ctype == "text/html" and html_part is None:
                 m = re.search(r'charset="?([A-Za-z0-9_\-]+)', hdr.get("content-type", ""), re.I)
                 html_part = (_decode_body(cte, body), m.group(1).lower() if m else None)
-            elif loc := hdr.get("content-location"):
+            elif loc := _header_url(hdr.get("content-location")):
                 key = asset_key(loc)
                 raw_parts[key] = (cte, body)
                 mimes[key] = ctype
@@ -117,7 +118,7 @@ def load_mht(data: bytes, hints: Hints | None = None) -> ExamSource:
             payload, charset = html_part
             return ExamSource(
                 html=payload, encoding=charset or _sniff_charset(payload), mimes=mimes, raw_parts=raw_parts,
-                url=top.get("snapshot-content-location") or None, saved_at=_iso_date(top.get("date")),
+                url=_header_url(top.get("snapshot-content-location")), saved_at=_iso_date(top.get("date")),
                 origin="mht", hints=hints or Hints(),
             )
     return _load_mht_email(data, hints)
@@ -174,6 +175,20 @@ def _parse_headers(block: bytes) -> dict[str, str]:
     return out
 
 
+def _header_url(value: str | None) -> str | None:
+    """A URL header as saved: plain (Chrome), or RFC 2047 encoded words folded over lines
+    (``=?utf-8?q?https=3A//cdn=2Edigialm=2Ecom//per/g01/?=`` …, other savers — 31 dump files, live run 2026-10-20)."""
+    v = (value or "").strip()
+    if "=?" in v:
+        try:
+            v = "".join(p.decode(c or "utf-8", "replace") if isinstance(p, bytes) else p
+                        for p, c in email.header.decode_header(v))
+        except Exception:
+            return None
+        v = re.sub(r"\s+", "", v)  # the folds between encoded words
+    return v or None
+
+
 def _decode_body(cte: str, body: bytes) -> bytes:
     if cte == "base64":
         return binascii.a2b_base64(body)
@@ -204,7 +219,7 @@ def _load_mht_email(data: bytes, hints: Hints | None) -> ExamSource:
         payload = part.get_payload(decode=True) or b""
         if ctype == "text/html" and html_part is None:
             html_part = (payload, part.get_content_charset())
-        elif loc := part.get("Content-Location"):
+        elif loc := _header_url(part.get("Content-Location")):
             key = asset_key(loc)
             assets[key] = payload
             mimes[key] = ctype
@@ -216,7 +231,7 @@ def _load_mht_email(data: bytes, hints: Hints | None) -> ExamSource:
         encoding=charset or _sniff_charset(payload),
         assets=assets,
         mimes=mimes,
-        url=msg.get("Snapshot-Content-Location") or None,
+        url=_header_url(msg.get("Snapshot-Content-Location")),
         saved_at=_iso_date(msg.get("Date")),
         origin="mht",
         hints=hints or Hints(),

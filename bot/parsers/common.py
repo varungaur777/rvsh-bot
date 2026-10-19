@@ -5,7 +5,8 @@ Used by: ``parsers/tcs.py``, ``parsers/edqt.py``, ``parsers/__init__.py``.
 
 Public API
 ----------
-- text: ``norm_space``, ``detect_lang``, ``clean_section_name``, ``clean_exam_name``
+- text: ``norm_space``, ``detect_lang``, ``script_of``, ``clean_section_name``, ``clean_exam_name``
+- ``OTHER_LANGS`` — ``{code: name}`` of the other Indian scripts ``script_of`` tells apart (Bengali, Tamil …)
 - dates/times: ``parse_date`` → ISO, ``parse_time_range`` → (display, start_hhmm, printed_shift), ``shift_from_start``
 - ``parse_html(source)`` → lxml root
 - ``RichText`` — converts an lxml node into mini-markup, registering images in ``ExamData.assets``
@@ -45,6 +46,29 @@ def detect_lang(text: str) -> str | None:
     dev, lat = len(_DEV.findall(text)), len(_LAT.findall(text))
     if dev + lat == 0:
         return None
+    return "hi" if dev >= 0.3 * (dev + lat) else "en"
+
+
+# other Indian scripts (owner 2026-10-19: RRB sheets in Bengali were filed as English — ``detect_lang`` sees no
+# Devanagari, so it said "en"); Marathi / Konkani are Devanagari and cannot be told from Hindi
+_OTHER_SCRIPTS = (("bn", "Bengali", "ঀ-৿"), ("pa", "Punjabi", "਀-੿"),
+                  ("gu", "Gujarati", "઀-૿"), ("or", "Odia", "଀-୿"),
+                  ("ta", "Tamil", "஀-௿"), ("te", "Telugu", "ఀ-౿"),
+                  ("kn", "Kannada", "ಀ-೿"), ("ml", "Malayalam", "ഀ-ൿ"),
+                  ("ur", "Urdu", "؀-ۿ"))
+OTHER_LANGS = {code: name for code, name, _r in _OTHER_SCRIPTS}
+_OTHER = [(code, re.compile(f"[{rng}]")) for code, _n, rng in _OTHER_SCRIPTS]
+
+
+def script_of(text: str) -> str | None:
+    """The language a text is written in, by script: ``"hi"`` / ``"en"`` (as ``detect_lang``) or another Indian
+    script's code (``"bn"`` …) when its letters make up ≥ 30 % of the letters. ``None`` when no letters."""
+    dev, lat = len(_DEV.findall(text)), len(_LAT.findall(text))
+    other = max(((len(rx.findall(text)), code) for code, rx in _OTHER), default=(0, None))
+    if dev + lat + other[0] == 0:
+        return None
+    if other[0] >= 0.3 * (dev + lat + other[0]):
+        return other[1]
     return "hi" if dev >= 0.3 * (dev + lat) else "en"
 
 
