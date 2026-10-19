@@ -57,10 +57,10 @@ async def load_quiz_command(client, message) -> None:
         await (fast.download(reply, str(tmp)) if fast else app.client.download_media(reply, file_name=str(tmp)))
         kind, files = await asyncio.to_thread(_zip_kind, tmp)
         if kind == "exam":
-            await app.sender.delete(message.chat.id, status.id)
+            await app.sender.remove(message.chat.id, status.id)
             return await jsoncmd._take(app, message.chat.id, user, reply, src=tmp)
         if kind == "questions":
-            await app.sender.delete(message.chat.id, status.id)
+            await app.sender.remove(message.chat.id, status.id)
             return await jsoncmd._take_zip(app, message.chat.id, user, reply, src=tmp)
         if kind != "quizzes":
             return await app.sender.edit_text(message.chat.id, status.id, "😕 <b>Nothing to load in this zip</b> — no quiz "

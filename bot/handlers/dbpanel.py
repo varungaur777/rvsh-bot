@@ -3,7 +3,10 @@
 Depends on: ``db.repo`` (collections, Mongo + JSON mirror, LRU), ``uploader`` (exports to dump), ``handlers.waits``.
 Used by: ``handlers/__init__.py``, the Admin Panel.
 
-- Home: Mongo state, JSON writes waiting, outbox, and every collection with its document count.
+- Home: Mongo state, JSON writes waiting, outbox, and every collection with its document count; **sizes** (owner
+  2026-10-19: "db command mai db ka size bhi dikhe"): Mongo data + indexes (share of the Atlas free 512 MB) and on
+  disk (``dbStats``), the JSON mirror folder (bytes, files; walked off the loop, kept a minute), and every
+  collection's size, biggest first, in an expandable quote (Mongo's ``$collStats``, else the mirror's folders).
 - A collection: newest documents first (10 per page) → tap one to see it (shortened when long; `📎` sends the
   whole one as a ``.json`` file), `🗑 Delete` → "Sure?" (both stores, cache dropped); `🔎 Open by ID`;
   `📤 Export to dump`. Home: `📦 Export everything`. An export is a zip laid out like ``_db`` — a folder per
@@ -27,6 +30,8 @@ from __future__ import annotations
 import asyncio
 import html
 import json
+import logging
+import os
 import time
 import zipfile
 from pathlib import Path
@@ -38,12 +43,84 @@ from bot.ui.keyboards import btn, cb, kb, parse_cb
 from bot.ui.progress import human_bytes
 from bot.ui.texts import t
 
+log = logging.getLogger(__name__)
 PAGE = 10
 _INLINE_MAX = 3200
 
 
 def _dump_json(doc) -> str:
     return json.dumps(doc, ensure_ascii=False, indent=1, default=str)
+
+
+ATLAS_FREE_MB = 512  # Atlas free tier (M0) storage limit
+_FOLDER_TTL_S = 60.0
+_folder_cache: dict[str, tuple[float, tuple]] = {}
+
+
+def _folder_sizes(root: Path) -> tuple[int, int, dict[str, int]]:
+    """The JSON mirror on disk: (bytes, files, {collection folder: bytes}) — one walk."""
+    total, files, per = 0, 0, {}
+    stack = [(root, None)]
+    while stack:
+        folder, top = stack.pop()
+        try:
+            entries = list(os.scandir(folder))
+        except OSError:
+            continue
+        for e in entries:
+            try:
+                if e.is_dir(follow_symlinks=False):
+                    stack.append((e.path, top or e.name))
+                elif e.is_file(follow_symlinks=False):
+                    n = e.stat(follow_symlinks=False).st_size
+                    total, files = total + n, files + 1
+                    if top:
+                        per[top] = per.get(top, 0) + n
+            except OSError:
+                continue
+    return total, files, per
+
+
+async def _json_sizes(root: Path) -> tuple[int, int, dict[str, int]]:
+    """``_folder_sizes`` off the event loop, remembered for a minute (a big mirror has many files)."""
+    key, now = str(root), time.monotonic()
+    hit = _folder_cache.get(key)
+    if hit and now - hit[0] < _FOLDER_TTL_S:
+        return hit[1]
+    got = await asyncio.to_thread(_folder_sizes, root)
+    _folder_cache[key] = (now, got)
+    return got
+
+
+async def sizes_block(app) -> list[str]:
+    """Lines for the panel (owner 2026-10-19: "db command mai db ka size bhi dikhe"): Mongo's size (data +
+    indexes, vs the Atlas free 512 MB) and on disk, the JSON mirror's size, and the biggest collections."""
+    repo, lines = app.repo, []
+    per: dict[str, int] = {}
+    src = "Mongo"
+    if repo.mongo_ok:
+        try:
+            s = await repo.mongo.sizes(list(COLLECTIONS))
+            used = s["data"] + s["indexes"]
+            lines.append(f"💾 Mongo size: <b>{human_bytes(used)}</b> (data {human_bytes(s['data'])} + indexes "
+                         f"{human_bytes(s['indexes'])}) · {used / (ATLAS_FREE_MB * 1024 * 1024):.1%} of the Atlas free "
+                         f"{ATLAS_FREE_MB} MB · on disk {human_bytes(s['storage'])}")
+            per = {c: v["data"] + v["indexes"] for c, v in s["colls"].items()}
+        except Exception as e:  # sizes are a nice-to-have: the panel works without them
+            log.info("db sizes: %r", e)
+            lines.append("💾 Mongo size: <i>could not be read</i>")
+    try:
+        total, files, folders = await _json_sizes(repo.json.root)
+        lines.append(f"📁 JSON mirror: <b>{human_bytes(total)}</b> · {files:,} files")
+        if not per:
+            per, src = {c: n for c, n in folders.items() if c in COLLECTIONS}, "JSON mirror"
+    except Exception as e:
+        log.info("json mirror size: %r", e)
+    if per:
+        top = sorted(per.items(), key=lambda x: -x[1])
+        rows = "\n".join(f"{c} · {human_bytes(n)}" for c, n in top)
+        lines.append(f"📊 <b>By collection</b> <i>({src})</i>\n<blockquote expandable>{rows}</blockquote>")
+    return lines
 
 
 async def home(app, uid: int):
@@ -53,7 +130,10 @@ async def home(app, uid: int):
     outbox = repo.outbox.size() if getattr(repo, "outbox", None) else 0
     lines = [f"🍃 Mongo: <b>{mongo}</b>", f"📝 JSON writes waiting: <b>{repo.json.pending_count}</b>  ·  "
              f"outbox: <b>{human_bytes(outbox)}</b>"]
-    text = "🗄 <b>Database</b>\n<blockquote>" + "\n".join(lines) + "</blockquote>\nTap a collection to look inside."
+    size = await sizes_block(app)
+    by_coll = size.pop() if size and size[-1].startswith("📊") else ""
+    text = ("🗄 <b>Database</b>\n<blockquote>" + "\n".join(lines + size) + "</blockquote>\n"
+            + (by_coll + "\n" if by_coll else "") + "Tap a collection to look inside.")
     buttons = [btn(f"{c} · {n:,}" if isinstance(n, int) else f"{c} · ?", cb("db", uid, c, "open"))
                for c, n in zip(COLLECTIONS, counts)]
     rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]

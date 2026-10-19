@@ -10,6 +10,8 @@ language), ``ap_<after|grid>`` (answer placement), ``mine`` (mark my answers), `
 ``qt_<s>`` (quiz language, one quiz or one per section, seconds per question), ``ok``, ``back``.
 
 Session steps: ``exam:collect`` → (Done) ``exam:inspect`` → ``exam:menu`` → ``exam:prefs`` → (Confirm) queued.
+``/slides`` (``handlers.slides``, admins): the task carries ``goal = "slides"`` → after Done straight to the slides
+card (``output: slides`` — look, section, language) → ``pipeline.run_slides``.
 The held task exists from the first input; every timeout or /cancel closes it (workdir deleted by
 ``TaskContext``). Timeouts: ``collect_idle_s`` after the last input → Done offered; ``input_timeout_s`` per step.
 """
@@ -19,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
+import time
 
 from bot.core.access import guard
 from bot.core.errors import BotError
@@ -26,6 +29,7 @@ from bot.core.sender import NO_PREVIEW
 from bot.exam import inputs, marking, pipeline
 from bot.exam.marks import fraction_text, scheme_text, short_section
 from bot.exam.urls import find_urls
+from bot.handlers import helpvideo
 from bot.ui.keyboards import btn, cb, kb, parse_cb
 from bot.ui.progress import ProgressMessage, Transfers, human_bytes
 from bot.ui.texts import t
@@ -33,6 +37,8 @@ from bot.ui.texts import t
 log = logging.getLogger(__name__)
 EXAM_EXT = (".mht", ".mhtml", ".html", ".htm")
 MAX_INPUT_BYTES = 30 * 1024 * 1024
+SLIDES_WANT: dict[int, float] = {}  # admin → when /slides asked for the next exam input (``handlers.slides``)
+SLIDES_WANT_S = 600.0
 _FRACTIONS = {0: "0", 0.25: "¼", 0.3333: "⅓", 0.5: "½"}
 
 
@@ -100,6 +106,15 @@ class _Collector:
         self.msg.close()
 
 
+def _goal(app, task, user, message=None) -> None:
+    """``/slides`` sent just before (or as the file's caption) → this exam is made as slides (admins)."""
+    asked = SLIDES_WANT.pop(user.id, None)
+    caption = (getattr(message, "caption", None) or "") if message is not None else ""
+    if ((asked is not None and time.monotonic() - asked < SLIDES_WANT_S) or caption.strip().startswith("/slides")) \
+            and app.access.is_admin(user.id):
+        task.data["goal"] = "slides"
+
+
 def _collector(app, sess, chat_id: int, task) -> _Collector:
     c = sess.data.get("collector")
     if c is None:
@@ -125,6 +140,17 @@ def link_error_text(reason: str | None) -> str:
     return t(key, code=r.removeprefix("http_")) + "\n" + t("link_save_hint")
 
 
+def _link_errors(task) -> list[str]:
+    return [it.get("error") or "" for it in inputs.failed(task) if it["kind"] == "url"]
+
+
+def _help(app, uid: int, task) -> dict:
+    """``reply_markup`` for a message saying the inputs failed: 🎬 help video (a link the site refused or that did
+    not answer) + 👤 Contact admin — none when nothing applies."""
+    rows = helpvideo.rows(app, uid, _link_errors(task))
+    return {"reply_markup": kb(*rows)} if rows else {}
+
+
 @guard(private_only=True)
 async def on_document(client, message) -> None:
     app, user = client.app, message.from_user
@@ -137,6 +163,7 @@ async def on_document(client, message) -> None:
     task = inputs.start_or_get(app, message.chat.id, user)
     if task is None:
         return await app.sender.send_message(message.chat.id, t("task_exists"), reply_to_message_id=message.id)
+    _goal(app, task, user, message)
     sess = app.sessions.get(user.id)
     app.sessions.disarm(user.id)
     inputs.register_file(app, task, message)  # only counted + forwarded to dump; downloaded after Done
@@ -158,9 +185,10 @@ async def on_text(client, message) -> None:
     task = inputs.start_or_get(app, message.chat.id, user)
     if task is None:
         return await app.sender.send_message(message.chat.id, t("task_exists"), reply_to_message_id=message.id)
+    _goal(app, task, user)
     sess = app.sessions.get(user.id)
     app.sessions.disarm(user.id)
-    inputs.add_hints(task, text.split("http")[0])
+    inputs.add_hints(task, text.split("http")[0].removeprefix("/slides"))
     chat_id = message.chat.id
     col = _collector(app, sess, chat_id, task)
     bars: dict[int, object] = {}
@@ -186,7 +214,7 @@ async def on_text(client, message) -> None:
     col = _collector(app, sess, chat_id, task)
     col.note = link_error_text(bad[0].get("error")) if bad else None
     if inputs.stored_count(task) == 0 and inputs.pending_count(task) == 0:
-        await col.final(col.note or t("inputs_all_failed"))
+        await col.final(col.note or t("inputs_all_failed"), **_help(app, user.id, task))
         await app.tasks.cancel(task.task_id, "system: link not reachable")
         return
     await col.show()
@@ -221,7 +249,7 @@ async def _offer_done(app, chat_id: int, uid: int) -> None:
         return
     col = _collector(app, sess, chat_id, task)
     if inputs.stored_count(task) == 0:  # everything failed → nothing to wait for
-        await col.final(t("inputs_all_failed"))
+        await col.final(t("inputs_all_failed"), **_help(app, uid, task))
         await app.tasks.cancel(task.task_id, "system: no usable input")
         return
     if not inputs.received_count(task):  # links only (already fetched): read ahead so "Done" answers at once
@@ -233,7 +261,8 @@ async def _offer_done(app, chat_id: int, uid: int) -> None:
             + f"\n<blockquote>{_inputs_list(task)}</blockquote>\n"
             + "Tap <b>✅ Done</b> when you've sent everything — more files or links of the same exam are welcome.")
     markup = kb([btn(t("btn_done"), cb("exm", uid, task.task_id, "done"), style="success"),
-                 btn(t("btn_cancel"), cb("exm", uid, task.task_id, "cancel"), style="danger")])
+                 btn(t("btn_cancel"), cb("exm", uid, task.task_id, "cancel"), style="danger")],
+                *(helpvideo.rows(app, uid, _link_errors(task)) if _link_errors(task) else []))
     await col.final(text, reply_markup=markup)
     app.sessions.arm_timeout(uid, app.settings.get("input_timeout_s"), lambda u: _timeout(app, chat_id, u))
 
@@ -341,6 +370,12 @@ async def _press(app, query, uid: int, sess, task, arg: str, chat_id: int, msg_i
         sess.prefs["scope"] = arg[3:]
     elif arg.startswith("qt_"):
         sess.prefs["time"] = int(arg[3:])
+    elif arg in ("ss_custom", "ss_original") and sess.prefs.get("output") == "slides":  # /slides look
+        sess.prefs["style"] = arg[3:]
+    elif arg.startswith("sc_") and sess.prefs.get("output") == "slides":  # /slides: all sections or one
+        n = len(sess.data["summary"]["sections"])
+        k = arg[3:]  # sc_all · sc_<i> (anything else from an odd client = all, never an error)
+        sess.prefs["section"] = min(int(k), n - 1) if k.isdigit() else None
     elif arg in ("ap_after", "ap_grid"):
         sess.prefs["answers"] = arg[3:]
     elif arg in ("sp_each", "sp_full") and app.access.is_admin(uid):
@@ -395,6 +430,14 @@ async def _inspect(app, chat_id: int, uid: int, sess, task) -> None:
     if task.closed:
         return
     sess.data["summary"] = summary
+    if task.data.get("goal") == "slides":  # /slides: no action menu — the slides card at once
+        langs = _langs(sess)
+        sess.prefs = {"output": "slides", "lang": "both" if len(langs) > 1 else langs[0], "style": "custom",
+                      "section": None}
+        sess.step = "exam:prefs"
+        await progress.finish(_prefs_text(sess), reply_markup=_prefs_markup(app, uid, task.task_id, sess))
+        app.sessions.arm_timeout(uid, app.settings.get("input_timeout_s"), lambda u: _timeout(app, chat_id, u))
+        return
     sess.step = "exam:menu"
     await progress.finish(_menu_text(sess), reply_markup=_menu_markup(uid, task.task_id))
     app.sessions.arm_timeout(uid, app.settings.get("input_timeout_s"), lambda u: _timeout(app, chat_id, u))
@@ -417,6 +460,22 @@ def _prefs_text(sess) -> str:
     p = sess.prefs
     if p.get("output") == "quiz":
         return (pipeline.summary_text(sess.data["summary"], sections=False) + _quiz_prefs_text(sess)
+                + "\n\n👇 Pick below — <b>✅ green</b> is chosen. Then tap <b>Confirm</b>.")
+    if p.get("output") == "slides":
+        langs = _langs(sess)
+        original = p.get("style") == "original"
+        lang = ("as in the sheet" if original else
+                f"{_LANGS.get(langs[0], langs[0])}  <i>(only language in the sheet)</i>" if len(langs) == 1 else
+                "Hindi + English  <i>(2 separate PDFs)</i>" if p["lang"] == "both" else _LANGS.get(p["lang"], p["lang"]))
+        look = ("As in the sheet — the portal's own question boxes, colours and ticks kept" if original else
+                "Custom — the bot's clean layout, bigger text")
+        secs = sess.data["summary"]["sections"]
+        sel = p.get("section")
+        part = (f"\n📚 {html.escape(short_section(secs[sel][0]))}  <i>· {secs[sel][1]} Qs</i>" if sel is not None
+                else f"\n📚 All {len(secs)} sections" if len(secs) > 1 else "")
+        return (pipeline.summary_text(sess.data["summary"], sections=False)
+                + f"\n\n🖼 <b>Slides PDF</b>\n<blockquote>🎨 {look}{part}\n🌐 {lang}\n📄 A4 landscape · one question per page · "
+                  "number in the top-right corner\n📘 Page 1: exam details · 🗝 answer key grid at the end</blockquote>"
                 + "\n\n👇 Pick below — <b>✅ green</b> is chosen. Then tap <b>Confirm</b>.")
     src = {"file": "from the sheet", "admin": "set for this exam", "rule": "official scheme",
            "preset": "used for this exam before", "default": "default — please check",
@@ -447,7 +506,9 @@ _HINTS = {"ql": "Language of the quiz questions", "qs": "One quiz of the whole e
           "qt": "How long each question stays open (players can change it when they start)",
           "r": "Marks for each right answer", "w": "Marks cut for each wrong answer (part of that question's marks)",
           "s": "Pick a section, then set its marks in the rows below", "l": "Language of the PDF",
-          "a": "Where the right answers are printed", "f": "Admins: one full PDF, or the full PDF plus one PDF per section"}
+          "a": "Where the right answers are printed",
+          "sl": "Custom: the bot's clean layout · As in the sheet: the portal's own question boxes (colours kept)",
+          "sc": "Slides of the whole exam, or of one section only", "f": "Admins: one full PDF, or the full PDF plus one PDF per section"}
 
 
 def _langs(sess) -> list[str]:
@@ -499,6 +560,23 @@ def _prefs_markup(app, uid: int, tid: str, sess):
         return btn(("✅ " if on else "") + text, cb("exm", uid, tid, arg), style="success" if on else None)
 
     rows = []
+    if p.get("output") == "slides":
+        langs = _langs(sess)
+        original = p.get("style") == "original"
+        rows.append(title("🎨 Look", "sl"))
+        rows.append([pick("Custom", "ss_custom", not original), pick("As in the sheet", "ss_original", original)])
+        if len(secs) > 1:  # owner 2026-10-19: "kisi ek section ki bhi slide" — all sections or one
+            sel = p.get("section")
+            rows.append(title("📚 Section", "sc"))
+            row = [pick("All sections", "sc_all", sel is None)]
+            for i, (n, _c) in enumerate(secs):
+                row.append(pick(f"{i + 1}. {short_section(n, 18)}", f"sc_{i}", sel == i))
+            rows += [row[i:i + 2] for i in range(0, len(row), 2)]
+        if len(langs) > 1 and not original:
+            rows.append(title("🌐 PDF language", "l"))
+            rows.append([pick("Both (2 PDFs)" if v == "both" else _LANGS[v], f"l_{v}", p["lang"] == v) for v in ("both", *langs)])
+        return kb(*rows, [btn("▶️ Confirm", cb("exm", uid, tid, "ok"), style="primary")],
+                  [btn(t("btn_cancel"), cb("exm", uid, tid, "cancel"), style="danger")])
     if p.get("output") == "quiz":
         langs = _langs(sess)
         if len(langs) > 1:
@@ -556,22 +634,23 @@ async def _confirm(app, chat_id: int, uid: int, sess, task) -> None:
     """``sess.step`` is already ``exam:queued`` (set by the button, so a second tap is stale)."""
     app.sessions.disarm(uid)
     output = sess.prefs.get("output") or "marks"
-    task.kind = {"custom": "custom_pdf", "original": "original_pdf", "quiz": "quiz"}.get(output, "marks")
+    task.kind = {"custom": "custom_pdf", "original": "original_pdf", "quiz": "quiz", "slides": "slides_pdf"}.get(output, "marks")
     if output != "marks":
         task.lane = "heavy"  # PDF rendering (spec §10)
     task.data["prefs"] = dict(sess.prefs)
     task.data["sections"] = [list(x) for x in sess.data["summary"]["sections"]]  # names for per-section marking
     from bot.quiz.maker import run_make
-    runner = {"custom": pipeline.run_custom, "original": pipeline.run_original, "quiz": run_make}.get(output, pipeline.run_marks)
+    runner = {"custom": pipeline.run_custom, "original": pipeline.run_original, "quiz": run_make,
+              "slides": pipeline.run_slides}.get(output, pipeline.run_marks)
     try:
-        if output != "quiz":  # a quiz has no marking step on this card
+        if output not in ("quiz", "slides"):  # a quiz / slides have no marking step on this card
             await marking.remember(app, sess.data["summary"], sess.prefs)
         pos = await app.tasks.submit(task, lambda tk: runner(app, tk))
     except Exception:
         sess.step = "exam:prefs"  # the card keeps working: Confirm can be tapped again
         app.sessions.arm_timeout(uid, app.settings.get("input_timeout_s"), lambda u: _timeout(app, chat_id, u))
         raise
-    first = "🎯 Making your quiz…" if output == "quiz" else "🧮 Calculating your marks…"
+    first = {"quiz": "🎯 Making your quiz…", "slides": "🖼 Making your slides…"}.get(output, "🧮 Calculating your marks…")
     text = first if pos <= 1 else t("queued", pos=pos)
     await app.sender.edit_text(chat_id, sess.ui_message_id, text)
 
@@ -579,4 +658,7 @@ async def _confirm(app, chat_id: int, uid: int, sess, task) -> None:
 @guard(anon=True)
 async def exam_command(client, message) -> None:
     """/tcs, /edqt — the command is only a hint (auto-detect decides)."""
-    await client.app.sender.send_message(message.chat.id, t("exam_how_to"), link_preview_options=NO_PREVIEW)
+    user = message.from_user  # None: an anonymous group admin (no one to tie the 🎬 button to)
+    rows = helpvideo.rows(client.app, user.id) if user else []
+    await client.app.sender.send_message(message.chat.id, t("exam_how_to"), link_preview_options=NO_PREVIEW,
+                                         **({"reply_markup": kb(*rows)} if rows else {}))
