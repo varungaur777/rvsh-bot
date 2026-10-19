@@ -29,11 +29,30 @@ Steps
 5. Saved through ``render.compress`` (§15.8; no image pass — sheet images are web images, ≤ 180 DPI on the page).
 
 Public API: ``render_original_pdf(ctx, out_path) -> dict`` (``{"pages", "parts", "missing", "bytes", "ms"}``).
-``ctx``: ``files`` (sheet paths), ``hints`` (``Hints`` fields), ``theme`` (``pdf_theme``), ``title``.
+``ctx``: ``files`` (sheet paths), ``hints`` (``Hints`` fields), ``theme`` (``pdf_theme``), ``title``, ``section``
+(optional: only that section of the paper, 0-based across the parts in order -- an EDQT part is one section, a TCS
+sheet's other ``section-cntnr`` boxes are dropped; ``/batch`` "each section + full").
+``groups`` instead of ``files`` (``/batch`` merged sections as in the sheet, owner 2026-10-19: "as it is style mai
+bhi merge kroge na sections" → "har page ke upar chhoti line"): ``[{"files", "hints", "section", "label"}]`` — each
+group (one shift's sheet) rendered like above, all joined in order, page numbers across the whole PDF, and every page
+of a group gets its ``label`` (``Exam • 17 Sep 2026 • Shift 1``) as a small line at the top left. With ``groups``,
+page 1 is an **index** (owner 2026-10-19: "merged vali sabhi pdf mai index page bhi bnao, usme shifts likh do konsi
+konsi hai, aur kis page se hai, page ka link bhi"): every shift, its pages, a link to its first page; the PDF's
+bookmarks list them too. ``oneliner`` (in ``ctx`` or a group; ``/batch`` ⚡ One-liners as in the sheet, owner
+2026-10-19): each question keeps only its **right option** (``_one_liners``) — TCS: the ``rightAns`` row (✓, its own
+number, the ``Ans`` label moved onto it); EDQT: the green / yellow cell's row, shown green with ``(b)`` written in it.
+A question without exactly one right option (dropped by the board, numerical) stays as it is.
+``render_original_slides(ctx, out_path) -> dict`` — ``/slides`` as in the sheet (owner 2026-10-19: "jodo slides mai";
+colours kept: "Rang rehne do"): every question's box cut from the sheet (marked while laying it out: a bookmark at its
+start and one at its end) and placed, scaled to fit, on its page of the slides frame PDF (``render_exam_pdf`` layout
+``slides`` with ``frame_only``: cover, ``Q n / N`` badge, header / footer, answer key) — vector, nothing re-typed;
+the watermark over it like every original PDF. ``ctx``: ``files``, ``hints``, ``theme``, ``frames`` (path),
+``body`` ([x0, y0, x1, y1] of a question page's free area), ``first`` (page of Q1), ``questions``. A sheet whose
+question count differs from the frames raises ``ValueError`` (the caller makes custom slides instead).
 Also ``clean(root, family, link='') -> list[str]`` (removed values; tests).
 
 Depends on: WeasyPrint, PyMuPDF, lxml, ``parsers`` (source loading + family detection), ``render.fonts``,
-``render.compress``, ``render.watermark``. Used by: ``exam.pipeline.run_original`` (batch "as-it-is" mode next).
+``render.compress``, ``render.watermark``. Used by: ``exam.pipeline`` (``run_original``, ``/batch`` as-it-is).
 """
 
 from __future__ import annotations
@@ -78,6 +97,9 @@ input.rvsh-hide {{ width: auto !important; }}  /* EDQT PART buttons: their own w
 img {{ max-width: 7.5in !important; height: auto; }}  /* only images wider than the page shrink (in a table cell a % max-width is ignored) */
 img, .rvsh-q tr {{ break-inside: avoid; }}
 .rvsh-qrow {{ break-after: avoid; }}
+.question-pnl table.menu-tbl {{ display: none !important; }}  /* TCS Question ID / Status box: never shown (owner 2026-10-19) */
+.question-pnl table.questionRowTbl {{ width: 100% !important; float: none !important; }}  /* the question: full width */
+.rvsh-ans {{ color: #fff !important; font-weight: bold !important; white-space: nowrap; padding: 0 4px; }}  /* EDQT one-liner: (b) */
 """
 
 
@@ -399,10 +421,11 @@ def _add_overlay(doc, page, img: int, stream: int) -> None:
     doc.xref_set_key(page.xref, "Contents", f"[{parts}]")
 
 
-def _stamp(doc, theme: dict) -> None:
+def _stamp(doc, theme: dict, labels: list[str] | None = None) -> None:
     """Header / footer links, page numbers and the watermark on every page (``TextWriter``: ``insert_text`` re-scans
     each page's resources per call — 0.1 s a call on image-heavy EDQT pages, 100× slower). The watermark is the
-    cached tiled image of ``render.watermark``, stored once in the PDF."""
+    cached tiled image of ``render.watermark``, stored once in the PDF. ``labels``: one per page, printed small at the
+    top left (merged sections: which shift the page is from)."""
     import pymupdf
 
     f_reg = pymupdf.Font(fontfile=str(FONT_DIR / FILES["latin"]))
@@ -439,19 +462,201 @@ def _stamp(doc, theme: dict) -> None:
             text(page, side, h - top / 2 + 4, theme["footer_text"], 8.5, f_reg, col.get("footer"), "l",
                  theme.get("footer_url") or "")
         text(page, w - side, h - top / 2 + 4, f"{i} / {total}", 9, f_bold, col.get("muted"), "r")
+        if labels and i <= len(labels) and labels[i - 1]:  # left of the centred header link, never over it
+            room = w / 2 - side - 14 - (f_bold.text_length(theme["header_text"], fontsize=9) / 2
+                                        if theme.get("header_text") else 0)
+            label, size = labels[i - 1], 8.5
+            while size > 6.5 and f_bold.text_length(label, fontsize=size) > room:
+                size -= 0.5
+            head, sep, tail = label.partition(" • ")  # too long: the exam name gives way, date / shift stay whole
+            while sep and f_bold.text_length(label, fontsize=size) > room:
+                head = head[:-2].rstrip() if len(head) > 6 else ""
+                label = f"{head}… • {tail}" if head else tail
+                sep = sep if head else ""
+            text(page, side, top / 2 + 4, label, size, f_bold, col.get("muted"), "l")
+
+
+def _index(doc, spans: list[tuple[str, int, int]], theme: dict, title: str) -> int:
+    """Index page(s) at the front of a merged PDF: per group (shift) its label, pages and a link to its first page;
+    the PDF bookmarks too. ``spans``: (label, first page, last page), 0-based before the index. → index pages added."""
+    import pymupdf
+
+    col = theme.get("colors") or {}
+    f_reg = pymupdf.Font(fontfile=str(FONT_DIR / FILES["latin"]))
+    f_bold = pymupdf.Font(fontfile=str(FONT_DIR / FILES["latin_b"]))
+    w, h = (doc[0].rect.width, doc[0].rect.height) if len(doc) else (PAGE_W_IN * 72, PAGE_H_IN * 72)
+    side, top, row = MARGIN_LR_IN * 72 + 14, MARGIN_TB_IN * 72 + 26, 24.0
+    per = max(1, int((h - top - 120 - MARGIN_TB_IN * 72 - 20) // row))
+    n_idx = max(1, -(-len(spans) // per))
+    accent, muted, text_c = _hex(col.get("header") or "#1a237e"), _hex(col.get("muted") or "#666666"), _hex(col.get("text") or "#111111")
+
+    def put(page, x, y, s, size, font, color, align="l"):
+        tw = font.text_length(s, fontsize=size)
+        x0 = x - tw if align == "r" else (x - tw / 2 if align == "c" else x)
+        wr = pymupdf.TextWriter(page.rect, color=color)
+        wr.append((x0, y), s, font=font, fontsize=size)
+        wr.write_text(page)
+        return pymupdf.Rect(x0, y - size, x0 + tw, y + 3)
+
+    def fit(s: str, size: float, font, room: float) -> str:
+        while len(s) > 8 and font.text_length(s, fontsize=size) > room:
+            s = s[:-2].rstrip() + "…"
+        return s
+
+    for k in range(n_idx):
+        page = doc.new_page(k, width=w, height=h)
+        y = top + 26
+        if k == 0:
+            put(page, w / 2, y, fit(title, 17, f_bold, w - 2 * side), 17, f_bold, text_c, "c")
+            y += 26
+            put(page, w / 2, y, f"Index  ·  {len(spans)} shift{'s' if len(spans) != 1 else ''}  ·  tap a shift to go there",
+                10, f_reg, muted, "c")
+            y += 30
+        page.draw_rect(pymupdf.Rect(side - 6, y - 15, w - side + 6, y + 7), color=accent, fill=accent)
+        for x, s, al in ((side, "#", "l"), (side + 30, "Shift", "l"), (w - side - 110, "Pages", "r"), (w - side, "Starts on", "r")):
+            put(page, x, y, s, 10, f_bold, (1, 1, 1), al)
+        y += row
+        for j, (label, a, b) in enumerate(spans[k * per:(k + 1) * per], k * per + 1):
+            first, last = a + n_idx, b + n_idx  # 0-based after the index pages
+            if j % 2 == 0:
+                page.draw_rect(pymupdf.Rect(side - 6, y - 16, w - side + 6, y + 8), color=None, fill=(0.97, 0.97, 0.98))
+            put(page, side, y, str(j), 10, f_reg, text_c)
+            r1 = put(page, side + 30, y, fit(label, 10, f_bold, w - 2 * side - 190), 10, f_bold, accent)
+            put(page, w - side - 110, y, f"{first + 1}–{last + 1}" if last > first else f"{first + 1}", 10, f_reg, text_c, "r")
+            r2 = put(page, w - side, y, f"page {first + 1}", 10, f_bold, accent, "r")
+            for r in (r1, r2):
+                page.insert_link({"kind": pymupdf.LINK_GOTO, "from": r, "page": first, "to": pymupdf.Point(0, 0)})
+            y += row
+    doc.set_toc([[1, label or f"Part {j}", a + n_idx + 1] for j, (label, a, _b) in enumerate(spans, 1)])
+    return n_idx
 
 
 def render_original_pdf(ctx: dict, out_path: str) -> dict:
-    import lxml.html
     import pymupdf
-    from weasyprint import HTML
 
-    from bot.parsers import common, detect_family, source
     from bot.render.compress import save_compressed
 
     t0 = time.perf_counter()
     for name in ("weasyprint", "fontTools"):  # missing remote images / font notes: counted, not logged per item
         logging.getLogger(name).setLevel(logging.CRITICAL)
+    theme = ctx.get("theme") or {}
+    out = pymupdf.open()
+    missing = n_parts = 0
+    labels: list[str] = []
+    try:
+        spans = []
+        for g in ctx.get("groups") or [ctx]:
+            before = len(out)
+            m, n = _render_into(out, {"oneliner": ctx.get("oneliner"), **g, "title": ctx.get("title")}, theme)
+            missing, n_parts = missing + m, n_parts + n
+            labels += [g.get("label") or ""] * (len(out) - before)
+            spans.append((g.get("label") or "", before, len(out) - 1))
+        if ctx.get("groups"):
+            k = _index(out, spans, theme, ctx.get("title") or "")
+            labels = [""] * k + labels
+        _stamp(out, theme, labels if ctx.get("groups") else None)
+        out.set_metadata({"title": ctx.get("title") or "", "author": theme.get("branding") or "",
+                          "creator": theme.get("branding") or "", "producer": theme.get("branding") or ""})
+        pages = len(out)
+        size = save_compressed(out, out_path, rewrite_images=False)  # sheet images: web DPI
+    finally:
+        out.close()
+    return {"pages": pages, "parts": n_parts, "missing": missing, "bytes": size,
+            "ms": int((time.perf_counter() - t0) * 1000)}
+
+
+_MARK_CSS = """
+.rvsh-qmark { bookmark-level: 1; bookmark-label: "@q"; }
+.rvsh-qend { bookmark-level: 1; bookmark-label: "@e"; display: block; height: 0; margin: 0; padding: 0; }
+"""
+
+
+def _mark_questions(root, family: str) -> int:
+    """Slides: each question's container gets a start mark and an empty end element after it (bookmarks → positions)."""
+    if family == "tcs":
+        boxes = root.xpath('//div[contains(@class,"question-pnl")]')
+    else:
+        boxes = []
+        for f in root.xpath('//font[contains(@class,"tdtext")]'):
+            if re.match(r"\s*Q\.?\s*No", f.text_content() or "", re.I):
+                table = next(f.iterancestors("table"), None)
+                if table is not None and table not in boxes:
+                    boxes.append(table)
+    for box in boxes:
+        box.set("class", ((box.get("class") or "") + " rvsh-qmark").strip())
+        end = box.makeelement("div", {"class": "rvsh-qend"})
+        end.tail, box.tail = box.tail, None
+        box.addnext(end)
+    return len(boxes)
+
+
+def _one_liners(root, family: str) -> int:
+    """``/batch`` ⚡ One-liners as in the sheet: every question keeps only its right option (module doc). Returns how
+    many questions were trimmed."""
+    n = 0
+    if family == "tcs":
+        for table in root.xpath('//table[contains(@class,"questionRowTbl")]'):
+            cells = [td for td in table.xpath('.//td[contains(@class,"rightAns") or contains(@class,"wrngAns")]')
+                     if next(td.iterancestors("table"), None) is table]
+            right = [td for td in cells if "rightAns" in (td.get("class") or "").split()]
+            if len(right) != 1 or len(cells) < 2:
+                continue
+            keep = right[0].getparent()
+            for td in cells:
+                row = td.getparent()
+                if row is keep:
+                    continue
+                label = next((c for c in row.xpath("./td") if (c.text_content() or "").strip() == "Ans"), None)
+                first = keep.xpath("./td")[0]
+                if label is not None and first is not right[0] and not (first.text_content() or "").strip():
+                    first.text, first.attrib["class"], first.attrib["align"] = "Ans", "bold", "center"
+                row.getparent().remove(row)
+            n += 1
+        return n
+    for f in root.xpath('//font[contains(@class,"tdtext")]'):
+        if not re.match(r"\s*Q\.?\s*No", f.text_content() or "", re.I):
+            continue
+        table = next(f.iterancestors("table"), None)
+        if table is None:
+            continue
+        rows = [r for r in table.xpath("./tr|./tbody/tr")]
+        start = next((i for i, r in enumerate(rows) if f in r.iter()), None)
+        if start is None:
+            continue
+        opts = []
+        for r in rows[start + 1:]:
+            tds = r.xpath("./td")
+            if len(tds) == 2 and tds[0].get("width") == "2%" and tds[0].xpath('.//font[contains(@class,"bld")]'):
+                opts.append(r)
+        right = [k for k, r in enumerate(opts) if (r.xpath("./td")[0].get("bgcolor") or "").lower() in ("green", "yellow")]
+        if len(right) != 1 or len(opts) < 2:
+            continue
+        for r in rows[rows.index(opts[-1]) + 1:]:  # the candidate's "Not Answered" line under the options
+            if re.match(r"\s*(not\s+)?(answered|attempted|visited)|\s*marked", r.text_content() or "", re.I):
+                r.getparent().remove(r)
+        for k, r in enumerate(opts):
+            if k != right[0]:
+                r.getparent().remove(r)
+        cell = opts[right[0]].xpath("./td")[0]
+        cell.set("bgcolor", "green")  # yellow = right but not chosen: the candidate's answer is not shown here
+        mark = cell.xpath('.//font[contains(@class,"bld")]')[0]
+        mark.text, mark.attrib["class"] = f"({'abcdefghij'[right[0]]})", "bld rvsh-ans"
+        for child in list(mark):
+            mark.remove(child)
+        n += 1
+    return n
+
+
+def _render_into(out, ctx: dict, theme: dict, marks: list | None = None) -> tuple[int, int]:
+    """One sheet (``files``, ``hints``, ``section``) laid out and appended to ``out`` → (missing resources, parts).
+    ``marks``: a list → question start / end bookmarks laid out and collected there as ``(label, page, y)``
+    (``render_original_slides``)."""
+    import lxml.html
+    import pymupdf
+    from weasyprint import HTML
+
+    from bot.parsers import common, detect_family, source
+
     hints = source.Hints(**(ctx.get("hints") or {}))
     parts, seen = [], set()
     for i, path in enumerate(ctx["files"]):
@@ -463,18 +668,35 @@ def render_original_pdf(ctx: dict, out_path: str) -> dict:
         if sig and sig in seen:  # the same section sent twice
             continue
         seen.add(sig)
-        parts.append((_order_key(i, src.hints.order, names), path, family))
+        parts.append((_order_key(i, src.hints.order, names), path, family, max(1, len(names))))
     parts.sort(key=lambda p: p[0])
+    only = ctx.get("section")  # /batch "each section": the paper's section number (0-based, all parts in order)
+    if only is not None:
+        start, keep = 0, []
+        for p in parts:
+            if start <= only < start + p[3]:
+                keep.append((p, only - start))
+            start += p[3]
+        if not keep:
+            raise ValueError(f"no section {only} in this sheet")
+        parts = [p for p, _ in keep]
+        within = {p[1]: k for p, k in keep}
 
-    theme = ctx.get("theme") or {}
     link = theme.get("header_url") or theme.get("footer_url") or ""
     fetcher = _fetcher_class()
-    out = pymupdf.open()
     missing = 0
-    for _, path, family in parts:  # one file at a time: only one layout tree in memory
+    for _, path, family, _n in parts:  # one file at a time: only one layout tree in memory
         src = source.load_path(path, hints)
         root = common.parse_html(src)
+        if only is not None and family != "edqt":  # a TCS sheet holds every section: keep the one asked for
+            for k, box in enumerate(root.xpath('//div[contains(@class,"section-cntnr")]')):
+                if k != within[path]:
+                    _drop(box)
+        if ctx.get("oneliner"):
+            _one_liners(root, family)
         clean(root, family, link)
+        if marks is not None:
+            _mark_questions(root, family)
         head = root.find("head")
         if head is None:
             head = root.makeelement("head", {})
@@ -485,7 +707,7 @@ def render_original_pdf(ctx: dict, out_path: str) -> dict:
         title.text = ctx.get("title") or "Response sheet"
         head.insert(0, title)
         style = head.makeelement("style", {})
-        style.text = _CSS
+        style.text = _CSS + (_MARK_CSS if marks is not None else "")
         head.append(style)  # last: wins over the sheet's own rules
         html = lxml.html.tostring(root, encoding="unicode", method="html", doctype="<!DOCTYPE html>")
         del root
@@ -493,14 +715,99 @@ def render_original_pdf(ctx: dict, out_path: str) -> dict:
         pdf = HTML(string=html, base_url=src.url, url_fetcher=f).write_pdf(presentational_hints=True)  # bgcolor / align / width: EDQT marks answers with bgcolor
         missing += f.missing
         with pymupdf.open(stream=pdf, filetype="pdf") as part:
+            if marks is not None:  # insert_pdf drops the outline: the marks are read here, pages moved on
+                base = len(out)
+                for _lvl, label, pno, dest in part.get_toc(simple=False):
+                    if label in ("@q", "@e"):
+                        to = dest.get("to") if isinstance(dest, dict) else None
+                        marks.append((label, base + pno - 1, float(to.y) if to is not None else 0.0))
             out.insert_pdf(part)
+    return missing, len(parts)
+
+
+SLIDE_GROW = 1.6  # a short question box may grow this much on its slide
+
+
+def _question_boxes(doc, marks: list) -> list[list[tuple[int, object]]]:
+    """Per question, its pieces ``[(page, Rect)]`` between its start and end mark (a box broken over a page has
+    two), trimmed to what is drawn there."""
+    import pymupdf
+
+    side, tb = MARGIN_LR_IN * 72, MARGIN_TB_IN * 72
+    boxes, start = [], None
+    for title, pno, y in marks:
+        if title == "@q":
+            start = (pno, y)
+            continue
+        if start is None:
+            continue
+        pieces = []
+        for p in range(start[0], pno + 1):
+            page = doc[p]
+            y0 = start[1] if p == start[0] else tb
+            y1 = y if p == pno else page.rect.height - tb
+            if y1 - y0 < 2:
+                continue
+            area = pymupdf.Rect(side - 4, y0, page.rect.width - side + 4, y1)
+            drawn = pymupdf.Rect()
+            for _kind, bbox in page.get_bboxlog():
+                r = pymupdf.Rect(bbox)
+                if (r.y0 <= area.y0 + 2 and r.y1 >= area.y1 - 2
+                        and (r.y0 < area.y0 - 2 or r.y1 > area.y1 + 2)):  # a section's side line / filler around it
+                    continue
+                if r.intersects(area) and r.width < page.rect.width * 0.99:
+                    drawn |= r & area
+            if not drawn.is_empty:
+                pieces.append((p, pymupdf.Rect(drawn.x0 - 1, drawn.y0 - 1, drawn.x1 + 1, drawn.y1 + 1) & area))
+        if pieces:
+            boxes.append(pieces)
+        start = None
+    return boxes
+
+
+def render_original_slides(ctx: dict, out_path: str) -> dict:
+    import pymupdf
+
+    from bot.render.compress import save_compressed
+    from bot.render.watermark import watermark_png
+
+    t0 = time.perf_counter()
+    for name in ("weasyprint", "fontTools"):
+        logging.getLogger(name).setLevel(logging.CRITICAL)
+    theme = ctx.get("theme") or {}
+    sheet = pymupdf.open()
+    frames = pymupdf.open(ctx["frames"])
     try:
-        _stamp(out, theme)
-        out.set_metadata({"title": ctx.get("title") or "", "author": theme.get("branding") or "",
-                          "creator": theme.get("branding") or "", "producer": theme.get("branding") or ""})
-        pages = len(out)
-        size = save_compressed(out, out_path, rewrite_images=False)  # sheet images: web DPI
+        marks: list = []
+        missing, _parts = _render_into(sheet, {"files": ctx["files"], "hints": ctx.get("hints"), "title": "",
+                                               "section": ctx.get("section")}, theme, marks=marks)
+        boxes = _question_boxes(sheet, marks)
+        if len(boxes) != int(ctx["questions"]):
+            raise ValueError(f"{len(boxes)} question boxes in the sheet, {ctx['questions']} in the exam")
+        x0, y0, x1, y1 = ctx["body"]
+        bw, bh = x1 - x0, y1 - y0
+        first = int(ctx.get("first") or 1)
+        overlay = {}
+        for w, h in {(pg.rect.width, pg.rect.height) for pg in frames}:  # before the page loop: it adds / deletes a page
+            png = watermark_png(theme.get("watermark") or {}, w, h)
+            overlay[(round(w), round(h))] = _overlay_stream(frames, png, w, h) if png else None
+        for k, pieces in enumerate(boxes):
+            page = frames[first + k]
+            w = max(r.width for _p, r in pieces)
+            h = sum(r.height for _p, r in pieces) + 4 * (len(pieces) - 1)
+            scale = min(bw / w, bh / h, SLIDE_GROW)
+            y = y0
+            for p, r in pieces:
+                target = pymupdf.Rect(x0, y, x0 + r.width * scale, y + r.height * scale)
+                page.show_pdf_page(target, sheet, p, clip=r)
+                y = target.y1 + 4 * scale
+            size = (round(page.rect.width), round(page.rect.height))
+            if overlay.get(size):  # the watermark over the sheet's box, as on every original PDF
+                _add_overlay(frames, page, *overlay[size])
+        pages = len(frames)
+        size_b = save_compressed(frames, out_path, rewrite_images=False)
     finally:
-        out.close()
-    return {"pages": pages, "parts": len(parts), "missing": missing, "bytes": size,
+        sheet.close()
+        frames.close()
+    return {"pages": pages, "questions": len(boxes), "missing": missing, "bytes": size_b,
             "ms": int((time.perf_counter() - t0) * 1000)}
