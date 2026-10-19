@@ -27,12 +27,12 @@ Depends on: ``quiz.store``, ``quiz.maker`` (``dump_sig``, ``_post_once``). Used 
 
 from __future__ import annotations
 
-import asyncio
 import html
 import logging
 import zipfile
 from pathlib import Path
 
+from bot.core.bg import spawn
 from bot.quiz import store
 
 log = logging.getLogger(__name__)
@@ -40,7 +40,6 @@ MAX_QUESTIONS = 2000
 ZIP_FILES = 1000
 FILE_MAX = 20 * 2**20
 _KEEP_OUT = ("_id", "plays")
-_background: set[asyncio.Task] = set()
 
 
 def _ref_ok(r) -> bool:
@@ -172,9 +171,7 @@ def post_later(app, quizzes: list[dict]) -> None:
             except Exception as e:
                 log.info("load_quiz: dump post of %s failed: %r", q.get("_id"), e)
 
-    t = asyncio.get_running_loop().create_task(run())
-    _background.add(t)
-    t.add_done_callback(_background.discard)
+    spawn(run(), "load-quiz-posts")
 
 
 def line(status: str, quiz: dict | None, name: str, why: str, me: str) -> str:

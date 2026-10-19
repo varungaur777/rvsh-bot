@@ -52,7 +52,8 @@ class AutoQuiz:
     async def tick(self) -> int:
         app = self.app
         groups = await app.repo.groups.find({"present": {"$ne": False}, "bot_is_admin": True, "banned": {"$ne": True},
-                                             "auto_quiz": {"$ne": False}}, projection={"authorised": 1})
+                                             "auto_quiz": {"$ne": False}, "can_write": {"$ne": False}},
+                                            projection={"authorised": 1})
         if not app.settings.get("public_enabled"):
             groups = [g for g in groups if g.get("authorised")]
         quizzes = await app.repo.quizzes.find({}, projection={"_id": 1})

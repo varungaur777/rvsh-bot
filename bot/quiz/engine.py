@@ -7,24 +7,33 @@ Every send goes through the central sender (``POLL`` priority; button clean-ups 
 Per question: the card(s) (one photo, or an album of two — sent by ``file_id`` read once per session from the dump
 messages; ``copy_message`` if that fails) and then a **non-anonymous quiz poll** with ``open_period`` = the chosen
 time. ``⏸ Pause`` ``⏹ Stop`` are on the start message and on the current poll only; the previous poll's buttons are
-removed when the next one is sent (in a group only when the chat's rate budget has room — the start message always
-works).
+**always** removed when the next one is sent (owner 2026-10-19: "group mai quiz chlte hue har question par pause and
+stop ata hai, vo latest poll aur 1st message par ho" — the edit used to be skipped in groups whenever the chat's rate
+budget was tight, i.e. almost always). The edit waits its turn at ``BULK`` priority; a group's per-question time
+counts it as one of its ~17 messages a minute.
 
 - **Private:** the next question comes right after the user answers; the timer only covers no answer. 3 questions
   in a row without an answer → paused (no spam to someone who left).
-- **Group:** the timer moves on; the per-question time is raised to stay under ~17 messages / minute; 3 questions
+- **Group:** the timer moves on; the per-question time is raised to stay under ~17 messages / minute (cards, poll,
+  explanation cards and the button clean-up of the previous poll); 3 questions
   without any answer → stopped. Stop / Pause / Resume (``handlers.quiz._can_control``): the starter, the group's
   admins / owner (anonymous included) and the bot's owner / admins (owner 2026-10-14); a quiz started by an anonymous
   admin (``starter`` 0) has no single starter. Anonymous admins' votes count when Telegram delivers them (as the group: one row named after the group, on
-  the group's board only — never in the global ranking).
+  the group's board only — never in the global ranking: no user behind it).
 - **Pause:** no new question; the open poll closes by itself; ``⏸ Paused at Q12/50`` + Resume / Stop on the start
   message; after ``quiz.pause_timeout_min`` the quiz stops and the results are posted. One active quiz per chat and
   per starter (a paused one counts) — a second start is refused with a ``⏹ Stop`` button for the first one (owner:
   "dusri quiz start krne se phle, phli vali ko band kre").
 - **End:** private → result (correct / wrong / skipped / time), ranked or practice (``quiz.store.record``), global
   top 10 + own rank; Review, Retry wrong (practice, not saved), Play again, Leaderboard, Share. Group → session board
-  (🥇🥈🥉, correct, time) + global leaderboard link; group play is never ranked globally.
+  (🥇🥈🥉, correct, time) + global leaderboard link. A group quiz played **to its last question** is each player's
+  ranked attempt when it is their first (owner 2026-10-19: "quiz mai group score bhi global ranking mai dalo" — chose
+  the first attempt anywhere, only a whole quiz); the board marks them ``🏆 #rank``. Stopped early → nobody ranked.
 - **Restart:** ``running_quizzes`` holds the chats with a quiz; on boot they get "stopped due to a restart".
+- **A chat that refuses the bot** (``sender.undeliverable``: the user blocked it, the group took its right to post,
+  slow mode, the group is gone): the quiz ends at once without posting (score so far kept) — never an error report.
+  A poll Telegram rejects because of its explanation (``INPUT_CONSTRUCTOR_INVALID``, Err.txt) is sent again without
+  it.
 - **Explanations** (quizzes from question JSON files, owner 2026-10-13): a short one is the poll's own explanation
   (``ex``); a long one is a card (``xc``, caption "💡 Explanation · Q3/50") sent **after the question is answered,
   right or wrong, with no waiting and no button** ("rukna nhi hai, next question ka button nhi lgana") — private:
@@ -54,8 +63,10 @@ import time
 from dataclasses import dataclass, field
 
 from pyrogram import enums, raw
+from pyrogram import errors as tg_errors
 
-from bot.core.sender import BULK, POLL
+from bot.core.bg import spawn
+from bot.core.sender import BULK, POLL, undeliverable
 from bot.quiz import store
 from bot.ui.keyboards import btn, cb, kb
 
@@ -164,9 +175,9 @@ class QuizEngine:
         if not qlist:
             raise QuizError("This quiz has no questions to play.")
         time_s = max(5, min(600, int(time_s)))
-        if group:  # stay under ~17 messages / minute: cards + poll + explanation cards per question
+        if group:  # stay under ~17 messages / minute: cards + poll + explanation cards + the old poll's button edit
             most = max(len(quiz["questions"][i].get("cards") or []) + len(quiz["questions"][i].get("xc") or [])
-                       for i in qlist) + 1
+                       for i in qlist) + 2
             time_s = max(time_s, math.ceil(most * 60 / GROUP_MSGS_PER_MIN) + 2)
         name = (" ".join(x for x in (getattr(starter, "first_name", ""), getattr(starter, "last_name", "")) if x)
                 or "Player") if starter is not None else "an anonymous admin"
@@ -257,16 +268,15 @@ class QuizEngine:
                 await self._send(s, pos)
             except Exception as e:
                 log.warning("quiz %s: question %d could not be sent: %r", s.sid, pos + 1, e)
-                if s.chat_id > 0 and e.__class__.__name__ == "UserBlockedBot":
-                    return await self._finish(s, "blocked", post=False)
+                if why := undeliverable(e):  # blocked / the chat took the bot's right to post: end quietly
+                    return await self._finish(s, why, post=False)
                 self.app.dump.report_error(e, f"quiz {s.quiz.get('_id')} Q{pos + 1}")
             self._arm(s, s.time_s + GRACE_S, pos)
 
     def _arm(self, s: Session, delay: float, pos: int) -> None:
         if s.timer:
             s.timer.cancel()
-        loop = asyncio.get_running_loop()
-        s.timer = loop.call_later(delay, lambda: loop.create_task(self._timeout(s, pos)))
+        s.timer = asyncio.get_running_loop().call_later(delay, lambda: spawn(self._timeout(s, pos), f"quiz-{s.sid}"))
 
     async def _timeout(self, s: Session, pos: int) -> None:
         if s.state != "running" or s.pos != pos:
@@ -293,8 +303,8 @@ class QuizEngine:
             await self._send_cards(s, s.question(pos)["xc"], caption=f"💡 <b>Explanation</b> · Q{pos + 1}/{s.total}")
         except Exception as e:
             log.info("quiz %s: explanation of Q%d not sent: %r", s.sid, pos + 1, e)
-            if s.chat_id > 0 and e.__class__.__name__ == "UserBlockedBot":
-                return await self._finish(s, "blocked", post=False)
+            if why := undeliverable(e):
+                return await self._finish(s, why, post=False)
         if s.state == "running" and s.pos == pos:
             await self._next(s)
 
@@ -311,18 +321,22 @@ class QuizEngine:
         branding = app.config.branding
         expl = q.get("ex") or (branding if branding and random.random() < float(app.settings.get("quiz.branding_probability") or 0)
                                else None)
-        msg = await app.sender.send_poll(s.chat_id, question, options, is_anonymous=False, type=enums.PollType.QUIZ,
-                                         correct_option_ids=[int(q["c"])], open_period=s.time_s, explanation=expl,
-                                         reply_markup=self.controls(s), priority=POLL)
+        poll_kw = dict(is_anonymous=False, type=enums.PollType.QUIZ, correct_option_ids=[int(q["c"])],
+                       open_period=s.time_s, reply_markup=self.controls(s), priority=POLL)
+        try:
+            msg = await app.sender.send_poll(s.chat_id, question, options, explanation=expl, **poll_kw)
+        except tg_errors.BadRequest as e:  # e.g. INPUT_CONSTRUCTOR_INVALID for an explanation (Err.txt): once without it
+            if not expl or undeliverable(e):
+                raise
+            log.warning("quiz %s Q%d: poll refused with its explanation (%r) — sent without it", s.sid, pos + 1, e)
+            msg = await app.sender.send_poll(s.chat_id, question, options, **poll_kw)
         s.sent_at[pos] = time.monotonic()
         pid = str(msg.poll.id)
         s.polls.append(pid)
         self.polls[pid] = (s, pos)
         old, s.ctrl_msg = s.ctrl_msg, msg.id
-        if old:
-            bucket = app.sender.bucket(s.chat_id)
-            if not s.group or (bucket is not None and bucket.tokens >= 2):
-                asyncio.get_running_loop().create_task(self._quiet(app.sender.edit_markup(s.chat_id, old, None, priority=BULK)))
+        if old:  # ⏸ ⏹ live only on the start message and this poll (owner 2026-10-19) — in groups too, always
+            spawn(self._quiet(app.sender.edit_markup(s.chat_id, old, None, priority=BULK)), f"quiz-{s.sid}-ctl")
 
     async def _send_cards(self, s: Session, refs: list[dict], caption: str | None = None) -> None:
         """One photo, or an album; ``caption`` on the (first) photo."""
@@ -335,7 +349,7 @@ class QuizEngine:
                 return
             await app.sender.call(s.chat_id, app.client.send_media_group, s.chat_id,
                                   [InputMediaPhoto(i, caption=caption if k == 0 else None) for k, i in enumerate(ids)],
-                                  priority=POLL)
+                                  priority=POLL, cost=len(ids))  # an album of 2 is 2 messages for the group's limit
             return
         for k, r in enumerate(refs):  # no file_id (dump unreadable at start): server-side copy
             await app.sender.copy(s.chat_id, r["chat_id"], r["message_id"], caption=caption if k == 0 else None,
@@ -383,8 +397,7 @@ class QuizEngine:
             if s.question(pos).get("xc"):  # its explanation card, then the next question (owner: "attempt hone k baad")
                 if s.timer:
                     s.timer.cancel()
-                loop = asyncio.get_running_loop()
-                s.timer = loop.call_later(NEXT_S, lambda: loop.create_task(self._explain(s, pos)))
+                s.timer = asyncio.get_running_loop().call_later(NEXT_S, lambda: spawn(self._explain(s, pos), f"quiz-{s.sid}"))
             else:
                 self._arm(s, NEXT_S, pos)
 
@@ -397,8 +410,7 @@ class QuizEngine:
         if s.timer:
             s.timer.cancel()
         mins = int(self.app.settings.get("quiz.pause_timeout_min") or 30)
-        loop = asyncio.get_running_loop()
-        s.pause_timer = loop.call_later(mins * 60, lambda: loop.create_task(self.stop(chat_id, "pause timeout")))
+        s.pause_timer = asyncio.get_running_loop().call_later(mins * 60, lambda: spawn(self.stop(chat_id, "pause timeout")))
         text = (note or f"⏸ <b>Paused</b> at Q{s.pos + 1}/{s.total}") + f"\n<i>Stops by itself after {mins} min.</i>"
         await self._quiet(self.app.sender.edit_text(chat_id, s.start_msg, self._start_text(s) + "\n\n" + text,
                                                     reply_markup=self.controls(s, paused=True)))
@@ -462,7 +474,7 @@ class QuizEngine:
         app = self.app
         await self._quiet(app.repo.running_quizzes.delete(s.chat_id))
         if s.ctrl_msg:
-            asyncio.get_running_loop().create_task(self._quiet(app.sender.edit_markup(s.chat_id, s.ctrl_msg, None, priority=BULK)))
+            spawn(self._quiet(app.sender.edit_markup(s.chat_id, s.ctrl_msg, None, priority=BULK)))
         if s.start_msg:
             end = {"done": "✅ Finished", "no answers": "⏹ Stopped — nobody answered", "pause timeout": "⏹ Stopped after a long pause"}
             await self._quiet(app.sender.edit_text(s.chat_id, s.start_msg, self._start_text(s) + f"\n\n<b>{end.get(reason, '⏹ Stopped')}</b>",
@@ -472,11 +484,15 @@ class QuizEngine:
             if s.group:
                 players = [self._player(s, uid) for uid in s.answers]
                 users = [p for p in players if p["uid"] > 0]
+                whole = reason == "done"  # ran to the last question: first attempts are ranked
+                info = {}
                 if users:
-                    await store.record(app, quiz["_id"], users, "group",
-                                       {"chat_id": s.chat_id, "title": s.chat_title, "link": s.chat_link})
+                    info = await store.record(app, quiz["_id"], users, "group",
+                                              {"chat_id": s.chat_id, "title": s.chat_title, "link": s.chat_link},
+                                              ranks=whole)
                 if post:
-                    await app.sender.send_message(s.chat_id, self._board(s, players), reply_markup=self._group_end_markup(s))
+                    await app.sender.send_message(s.chat_id, self._board(s, players, info, whole),
+                                                  reply_markup=self._group_end_markup(s))
                 return
             me = self._player(s, s.starter)
             self.finished[(s.starter, quiz["_id"])] = {"at": time.time(), "qlist": list(s.qlist[:s.pos + 1]),
@@ -492,7 +508,10 @@ class QuizEngine:
                 await app.sender.send_message(s.chat_id, self._result_text(s, me, info, stats),
                                               reply_markup=self.result_markup(s.starter, quiz, me))
         except Exception as e:
-            app.dump.report_error(e, f"quiz finish {quiz.get('_id')}")
+            if why := undeliverable(e):  # the player blocked the bot / the group took the bot's rights (Err.txt)
+                log.info("quiz %s: result not posted (%s)", s.sid, why)
+            else:
+                app.dump.report_error(e, f"quiz finish {quiz.get('_id')}")
 
     def _result_text(self, s: Session, me: dict, info: dict | None, stats: dict | None) -> str:
         q = s.quiz
@@ -520,17 +539,24 @@ class QuizEngine:
                      btn("📤 Share", switch_inline_query=qid)])
         return kb(*rows)
 
-    def _board(self, s: Session, players: list[dict]) -> str:
+    def _board(self, s: Session, players: list[dict], info: dict | None = None, whole: bool = True) -> str:
         players.sort(key=lambda p: (-p["correct"], p["time_s"]))
         medals = {1: "🥇", 2: "🥈", 3: "🥉"}
         q = s.quiz
         head = f"🏁 <b>{html.escape(q.get('title') or 'Quiz')}</b> — finished\n🧩 {s.pos + 1} of {s.total} questions played\n"
         if not players:
             return head + "\n<i>Nobody answered.</i>"
+        info = info or {}
+
+        def ranked(p: dict) -> str:
+            i = info.get(p["uid"]) or {}
+            return f" · 🏆 #{i['rank']}" if i.get("ranked") and i.get("rank") else ""
         rows = [f"{medals.get(i, f'{i}.')} {html.escape(p['name'])} — <b>{p['correct']}</b> ✅ · {store._dur(p['time_s'])}"
-                for i, p in enumerate(players[:30], 1)]
+                + ranked(p) for i, p in enumerate(players[:30], 1)]
         more = f"\n… and {len(players) - 30} more" if len(players) > 30 else ""
-        return head + "\n" + "\n".join(rows) + more + "\n\n<i>Group scores are not ranked globally.</i>"
+        note = ("🏆 #N = first attempt, now in the global leaderboard at that place." if whole else
+                "Stopped before the last question — not counted in the global leaderboard.")
+        return head + "\n" + "\n".join(rows) + more + f"\n\n<i>{note}</i>"
 
     def _group_end_markup(self, s: Session):
         me = self.app.me.username
