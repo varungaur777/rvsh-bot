@@ -29,6 +29,12 @@ TEXTS: dict[str, str] = {
                   "/stats — is the bot healthy · /task — tasks, cancel one · /cq — clear the queue\n"
                   "/bc — broadcast · /stopbc — stop it · /msg — message one user\n"
                   "/results — result PDF of an exam\n"
+                  "/links — saved exam links, Hindi and English as separate .txt files (reply to a list of links: "
+                  "check it)\n"
+                  "/batch — PDFs of many exam links: reply to a list (or pick an exam) → each shift's Hindi + English "
+                  "PDFs, section-wise; runs beside your own tasks (⏹ on its message stops it)\n"
+                  "/slides — an exam link or .mht → a PDF with one question per landscape page, exam details on "
+                  "page 1, the answer key at the end (custom look, or the sheet's own boxes; whole exam or one section)\n"
                   "/admin — admins · /groups — groups (links, members, admins) · /user — everything about a user, "
                   "their groups too\n"
                   "/qz — quiz settings, auto quiz, Web App, Mini App link\n"
@@ -36,7 +42,7 @@ TEXTS: dict[str, str] = {
                   "/es — exam settings · /ps — PDF settings · /wm — watermark\n"
                   "/ls — files · /clean — delete leftovers · /log — the log file\n"
                   "/on · /off — open or close the bot to everyone · /restart</blockquote>",
-    "help_owner": "\n👑 <b>Owner</b>: /bot — bot settings and config.env · /db — database · /rm — delete a file or folder\n"
+    "help_owner": "\n👑 <b>Owner</b>: /bot — bot settings and config.env · /db — database (counts and sizes) · /rm — delete a file or folder\n"
                   "/auth · /deauth — in a group (or <code>/auth -100…</code>): it keeps working while the bot is /off",
     "exam_how_to": "📤 <b>Send your response sheet</b>\n\n"
                    "<blockquote>• the <b>link</b> of your response sheet (digialm.com / cbexams.com), or\n"
@@ -57,6 +63,10 @@ TEXTS: dict[str, str] = {
     "banned": "🚫 You can't use this bot.",
     "admins_only": "🔒 This is for admins only.",
     "slow_down": "Please slow down a little 🙂",
+    # a chat refused the bot (sender.undeliverable) — shown on a button press only (alerts are plain text)
+    "cant_cant_write": "⚠️ I can't post in this chat — a group admin must let me send messages (or make me an admin).",
+    "cant_slowmode": "⏳ Slow mode is on in this chat — make me an admin so I can post, or try again later.",
+    "cant_gone": "⚠️ I can't reach this chat any more.",
     "anon_admin": "🕶 <b>You are writing as the group</b> (anonymous admin), so I can't tell who you are.\n"
                   "<i>Turn off “Remain anonymous” for a moment, or use this in a private chat with me.</i>",
     # tasks & queue
@@ -81,6 +91,9 @@ TEXTS: dict[str, str] = {
     "error_not_an_exam_file": "📄 <b>Not a response sheet</b>\nPlease send the <code>.mht / .mhtml</code> file of the sheet.",
     "error_unknown_format": "📄 <b>Unsupported sheet</b>\nOnly TCS (digialm) and EDQT (cbexams) sheets are supported.",
     "error_no_questions": "📄 <b>No questions found</b>\nThe file may be incomplete — save the page again and resend.",
+    "error_other_language": "🌐 <b>This sheet is not in Hindi or English</b>\nYour marks work as usual; custom PDFs, "
+                            "slides and quizzes are made only from Hindi or English sheets. The <i>as in the sheet</i> "
+                            "PDF works.",
     "error_mixed_sources": "⚠️ <b>Mixed files</b>\nPlease send files of one exam at a time (TCS and EDQT were mixed).",
     "error_different_exams": "⚠️ <b>Different exams</b>\nThese files belong to different exams or candidates — send one at a time.",
     "error_source_unavailable": "🔗 <b>I couldn't open that link</b>\n<i>Chrome → ⋮ → Download / Save page as → .mhtml, "

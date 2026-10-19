@@ -140,7 +140,10 @@ class ProgressMessage:
         if wait > 0:
             await asyncio.sleep(wait)
         if text != self._shown or kw:
-            await self.sender.edit_text(self.chat_id, self.message_id, text, priority=INTERACTIVE, **kw)
+            try:
+                await self.sender.edit_text(self.chat_id, self.message_id, text, priority=INTERACTIVE, **kw)
+            except tg_errors.MessageIdInvalid:  # the user deleted the status message: the final word comes anew
+                self.message_id = (await self.sender.send_message(self.chat_id, text, priority=INTERACTIVE, **kw)).id
             self._shown = text
 
     def close(self) -> None:
