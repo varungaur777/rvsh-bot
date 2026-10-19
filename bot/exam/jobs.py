@@ -6,7 +6,8 @@ Public API
 ----------
 - ``preload()`` — warm-up job (imports the parsers in a fresh worker).
 - ``input_files(folder) -> list[Path]`` — the sheets of a task workdir, in arrival order.
-- ``inspect_sheets(folder, hints) -> (ExamMeta, dict)`` — meta (for the URL registry) + the summary shown to the user.
+- ``inspect_sheets(folder, hints) -> (ExamMeta, dict)`` — meta (for the URL registry) + the summary shown to the user;
+  ``census`` / ``medium`` = the sheet's real language question by question (``schema.medium``: saved with the link).
 - ``score_sheets(folder, hints, plus, minus, source) -> (ExamData, Score)`` — the ``ExamData`` is slim (meta +
   candidate only: no questions cross the process boundary).
 - ``exam_file_names(paths, hints) -> list[str | None]`` — dump file names ``(dd-mm-yyyy) Exam [- section] (Shift N)``.
@@ -21,7 +22,7 @@ from pathlib import Path
 
 from bot.exam.keys import exam_key, meta_line
 from bot.exam.marks import Score, score
-from bot.exam.schema import main_languages
+from bot.exam.schema import lang_census, main_languages, medium
 from bot.parsers import parse_source, parse_sources, source
 from bot.parsers.models import ExamData, ExamMeta, Marking
 
@@ -49,6 +50,7 @@ def _load(folder, hints: dict | None) -> ExamData:
 def inspect_sheets(folder, hints: dict | None) -> tuple[ExamMeta, dict]:
     data = _load(folder, hints)
     m, marking = data.meta, data.marking
+    census = lang_census(data)
     return m, {
         "exam_name": m.exam_name, "level": m.level, "date": m.date, "shift": m.shift, "time": m.time,
         "source": m.source, "languages": main_languages([set(q.lang) for q in data.questions()],
@@ -56,7 +58,7 @@ def inspect_sheets(folder, hints: dict | None) -> tuple[ExamMeta, dict]:
         "exam_key": exam_key(m),
         "sections": [[s.name, len(s.questions)] for s in data.sections], "questions": data.n_questions,
         "marking": [marking.plus, marking.minus] if marking else None, "has_roll": bool(data.candidate.roll_no),
-        "meta_line": meta_line(m), "warnings": data.warnings[:5],
+        "meta_line": meta_line(m), "warnings": data.warnings[:5], "census": census, "medium": medium(census),
     }
 
 

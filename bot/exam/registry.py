@@ -35,7 +35,8 @@ from bot.compute import run_cpu
 from bot.core.tgref import from_message, private_link
 from bot.exam import bundle
 from bot.exam.keys import meta_line
-from bot.exam.schema import decide
+from bot.core.errors import UserFacingError
+from bot.exam.schema import decide, medium
 from bot.parsers.models import ExamMeta
 from bot.ui.progress import human_bytes
 
@@ -78,6 +79,9 @@ async def ensure(app, task) -> dict:
     folder, hints = str(task.workdir / "in"), task.data.get("hints") or {}
     sig, resp = await run_cpu(app, "render", task.task_id, bundle.sheet_signature, folder, hints, est_mb=60)
     task.data["responses"] = resp
+    other = medium(sig.get("census") or {})["other"]
+    if other:  # a Bengali / Tamil … sheet never enters the bank (owner 2026-10-19: "Result do, data mat lo")
+        raise UserFacingError("other_language", f"{sig['exam']['exam_key']}: {other}")
     base = sig["exam"]["exam_key"]
     repo = app.repo
     async with _KeyLock(base):

@@ -18,6 +18,14 @@ Public API (all pure functions — paths in, small data out)
 - ``write_bundle(folder, hints, out_zip, ocr_mode="lazy") -> dict`` — parse, **process every image**
   (``exam.imgproc``), build the JSON, write the zip; returns ``{"sig", "questions", "images", "kinds", "bytes", "ms"}``.
 - ``merge_bundles(stored, new, out, add_langs) -> dict`` — add a language from another candidate's bundle.
+- ``section_key(name) -> str`` — a section name as matched across shifts (``PART-A (General Intelligence)`` and
+  ``General Intelligence`` → ``general intelligence``).
+- ``sections_of(zips) -> [[(name, questions)]]`` — every bundle's sections, in order.
+- ``merge_sections(parts, out_zip, title) -> dict`` — ``/batch`` merged / one-liner (spec §14.7 modes 3–4): one
+  section of several shifts' bundles → one bundle; ``parts`` ``[{"zip", "section", "label", "tag"}]`` → a section per
+  part named ``label``, every question carrying ``tag`` (``exam • date • shift``, printed under it); images copied
+  once (ids are content-based, so the same picture in two shifts is one file). → ``{"questions", "sections",
+  "images", "languages", "main_languages", "part_languages" (each part's own PDF languages), "bytes", "ms"}``.
 - ``read_doc(zip_path) -> dict`` — the exam JSON from a bundle. ``read_image(zip_path, file) -> bytes``.
 - ``content_bbox(data) -> (w, h, [x0, y0, x1, y1] | None)`` — non-white area (tight answer boxes, §15.4).
 """
@@ -81,8 +89,10 @@ def content_bbox(data: bytes) -> tuple[int, int, list[int] | None]:
 
 
 def sheet_signature(folder, hints: dict | None) -> tuple[dict, dict]:
+    """(``schema.signature`` + ``census`` — questions per language, ``schema.lang_census``; not stored —, the
+    candidate's responses)."""
     data = _load(folder, hints)
-    return schema.signature(data), schema.responses(data)
+    return {**schema.signature(data), "census": schema.lang_census(data)}, schema.responses(data)
 
 
 def write_bundle(folder, hints: dict | None, out_zip, ocr_mode: str = "lazy") -> dict:
@@ -252,6 +262,55 @@ def merge_bundles(stored_zip, new_zip, out_zip, add_langs: list[str]) -> dict:
     a["meta"]["images"] = images
     return {"languages": langs, "questions": a["meta"].get("questions"), "images": images, "added": added_q,
             "bytes": os.path.getsize(out_zip), "ms": int((time.perf_counter() - t0) * 1000)}
+
+
+def section_key(name: str) -> str:
+    import re
+
+    from bot.exam.marks import short_section
+    return re.sub(r"[^\w]+", " ", short_section(name or "", 500).lower()).strip()
+
+
+def sections_of(zips: list[str]) -> list[list[tuple[str, int]]]:
+    return [[(sec["name"], len(sec["questions"])) for sec in read_doc(z)["sections"]] for z in zips]
+
+
+def merge_sections(parts: list[dict], out_zip, title: str) -> dict:
+    t0 = time.perf_counter()
+    docs: dict[str, dict] = {}
+    sections, langs, files = [], [], {}
+    for part in parts:
+        doc = docs.get(part["zip"]) or docs.setdefault(part["zip"], read_doc(part["zip"]))
+        sec = doc["sections"][part["section"]]
+        qs = []
+        for q in sec["questions"]:
+            qs.append({**q, "tag": part.get("tag") or ""})
+            for img in q["images"]:
+                files.setdefault(img["file"], part["zip"])
+        sections.append({"name": part.get("label") or sec["name"], "questions": qs})
+        langs += [x for x in doc["meta"].get("languages") or [] if x not in langs]
+    first = docs[parts[0]["zip"]] if parts else {"meta": {}}
+    n = sum(len(x["questions"]) for x in sections)
+    doc = {"schema_version": first.get("schema_version"), "sections": sections,
+           "meta": {**first["meta"], "exam_name": title, "languages": langs, "questions": n, "merged_from": len(parts),
+                    "images": len(files)}}
+    zs = {z: zipfile.ZipFile(z) for z in docs}
+    try:
+        with zipfile.ZipFile(out_zip, "w") as z:
+            for f, src in sorted(files.items()):
+                z.writestr(zipfile.ZipInfo(f, date_time=(2026, 1, 1, 0, 0, 0)), zs[src].read(f),
+                           compress_type=zipfile.ZIP_STORED)
+            z.writestr(zipfile.ZipInfo("exam.json", date_time=(2026, 1, 1, 0, 0, 0)), orjson.dumps(doc),
+                       compress_type=zipfile.ZIP_DEFLATED, compresslevel=6)
+    finally:
+        for x in zs.values():
+            x.close()
+    # languages a whole PDF can be made in (a language-subject section does not count — ``schema.main_languages``)
+    names = [(docs[pt["zip"]]["sections"][pt["section"]]["name"], len(x["questions"])) for pt, x in zip(parts, sections)]
+    main = schema.main_languages([set(q["lang"]) for x in sections for q in x["questions"]], names)
+    per_part = [schema.main_languages([set(q["lang"]) for q in x["questions"]], [nm]) for x, nm in zip(sections, names)]
+    return {"questions": n, "sections": len(sections), "images": len(files), "languages": langs, "main_languages": main,
+            "part_languages": per_part, "bytes": os.path.getsize(out_zip), "ms": int((time.perf_counter() - t0) * 1000)}
 
 
 def read_doc(zip_path) -> dict:

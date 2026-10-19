@@ -24,6 +24,8 @@ Public API
 - ``responses(data) -> {qref: {lang, oh, idx, oid} | None}`` — this candidate's choices (memory / the task only).
 - ``decide(new_sig, stored) -> (action, failed, added_languages)`` · ``compare(...)`` → failed checks only.
 - ``chosen_in(doc, responses) -> {qref: index}`` — the candidate's choices as option indices of a stored JSON.
+- ``lang_census(data) -> {lang: n}`` · ``medium(census) -> {langs, other, mixed}`` — which language a candidate's
+  sheet is really in, question by question (owner 2026-10-19: RRB sheets mix Hindi / English, some are Bengali).
 
 Example (abridged)::
 
@@ -50,6 +52,7 @@ import time
 import unicodedata
 
 from bot.exam.keys import exam_key
+from bot.parsers.common import OTHER_LANGS, script_of
 from bot.parsers.models import ExamData, Question, image_ids, plain  # noqa: F401 (image_ids re-exported)
 
 SCHEMA_VERSION = 2  # 2: per-language hashes, qkey / qref, language merge
@@ -186,6 +189,66 @@ def main_languages(per_question: list, sections: list | None = None) -> list[str
             counts[lang] = counts.get(lang, 0) + 1
     main = sorted(lang for lang, n in counts.items() if n >= MAIN_SHARE * len(pool))
     return main or [max(counts, key=counts.get)]
+
+
+# ------------------------------------------------------------------ the sheet's medium (links: /links, /batch)
+MIXED_SHARE = 0.05  # a sheet with ≥ 5 % (and ≥ 2) questions in the other language is reported as mixed
+
+
+def lang_census(data: ExamData) -> dict[str, int]:
+    """Questions per language as the candidate saw them (owner 2026-10-19: an RRB sheet shows each question in the
+    language the candidate last switched to, so one sheet can be 55 Hindi + 45 English; and a Bengali-medium sheet
+    was filed as English). Read from the text itself (``script_of``: the question, else its options), not from the
+    parser's per-section language: ``"hi"``, ``"en"``, another Indian script (``"bn"`` …), ``"both"`` (a question
+    holding both versions — EDQT). Not counted: questions without letters (image-only) and language-subject
+    sections (English / Hindi Language — printed in their own language in every medium)."""
+    out: dict[str, int] = {}
+    for s in data.sections:
+        if _LANG_SUBJECT.search(s.name or ""):
+            continue
+        for q in s.questions:
+            if len(q.lang) > 1:
+                lang = "both"
+            else:
+                lc = next(iter(q.lang.values()), None)
+                if lc is None:
+                    continue
+                lang = script_of(plain(lc.question)) or script_of(" ".join(plain(o) for o in lc.options))
+            if lang:
+                out[lang] = out.get(lang, 0) + 1
+    return out
+
+
+def medium(census: dict[str, int]) -> dict:
+    """The link's language from ``lang_census`` (owner 2026-10-19):
+
+    - any question in another Indian script → ``langs: ["bn"]`` (that script), ``other: "bn"`` — the link is saved,
+      but ``/links`` files and ``/batch`` take Hindi and English only ("link store to kro other language ka par …
+      bs hindi and english hi lene hai"), and it never goes into the exam bank;
+    - mostly both versions (EDQT) → ``["en", "hi"]``;
+    - else the majority of Hindi vs English (≥ 60 %) → that one; no majority (55 / 45) → ``["en", "hi"]`` — the link
+      goes into both files ("dono mai yahi link dal do … aur mention krdo ki mixed hai").
+
+    ``mixed``: ``{lang: n}`` of the minority language when it is ≥ 5 % and ≥ 2 questions, else ``{}``.
+    ``langs`` is ``[]`` when no question has letters."""
+    other = {k: n for k, n in census.items() if k in OTHER_LANGS}
+    hi, en, both = census.get("hi", 0), census.get("en", 0), census.get("both", 0)
+    if other:
+        code = max(other, key=other.get)
+        return {"langs": [code], "other": code, "mixed": {k: n for k, n in census.items() if k != code}}
+    total = hi + en + both
+    if not total:
+        return {"langs": [], "other": None, "mixed": {}}
+    if both >= MAIN_SHARE * total:
+        return {"langs": ["en", "hi"], "other": None, "mixed": {}}
+    major = "hi" if hi >= en else "en"
+    minor = "en" if major == "hi" else "hi"
+    n_minor = census.get(minor, 0)
+    langs = [major] if census.get(major, 0) >= MAIN_SHARE * (hi + en) else ["en", "hi"]
+    mixed = {minor: n_minor} if n_minor >= 2 and n_minor >= MIXED_SHARE * total else {}
+    if len(langs) > 1 and both < MAIN_SHARE * total:
+        mixed = {"hi": hi, "en": en}
+    return {"langs": langs, "other": None, "mixed": mixed}
 
 
 # ------------------------------------------------------------------ signature / responses / compare
