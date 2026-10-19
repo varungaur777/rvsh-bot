@@ -13,6 +13,14 @@ Public API
   ``core.delivery``), save the result.
 - ``await run_original(app, task)`` — Marks + Original PDF (scorecard, then ``render.original_pdf``, spec §14.2).
 - ``await run_custom(app, task)`` — Marks + Custom PDF (spec §14.3).
+- ``await run_slides(app, task)`` — ``/slides`` (admins, owner 2026-10-19): no marks; the exam from the bank → one
+  question per A4-landscape page, exam details on page 1, answer key grid at the end (``render_exam_pdf`` layout
+  ``slides``), one PDF per chosen language, cached like the custom PDF. ``prefs.style == "original"`` (owner
+  2026-10-19: "jodo slides mai", colours kept): the sheet's own question boxes on the same slides
+  (``original_pdf.render_original_slides``), one PDF in the sheet's language, not cached (it shows the candidate's
+  answers); a sheet whose boxes cannot be matched to its questions → the custom slides, with a note.
+- ``await custom_outputs(...)`` / ``await original_outputs(...)`` — the PDFs themselves (full + optional per section,
+  delivered); shared by the two runners above and ``/batch`` (``exam.batch``).
 - ``scorecard_caption(meta, score, branding)`` — the caption (section-wise detail in an expandable quote).
 - ``load_exam(task)`` — parse the files already in the workdir (shared by every output runner).
 
@@ -36,9 +44,10 @@ from bot.exam.marks import mask_name, mask_roll, negative_from_fraction, short_s
 from bot.exam.jobs import input_files, inspect_sheets, score_sheets
 from bot.exam.results import save_result
 from bot.exam.schema import main_languages
-from bot.exam.urls import register as register_url
+from bot.exam.urls import register as register_url, sheet_langs
 from bot.net.fetcher import detect_kind
 from bot.parsers import parse_sources, source
+from bot.parsers.common import OTHER_LANGS
 from bot.parsers.models import ExamData, Marking
 from bot.render.cards import render_scorecard
 from bot.ui.progress import ProgressMessage
@@ -59,14 +68,17 @@ def load_exam(task) -> ExamData:
 
 async def inspect(app, task) -> dict:
     """Parse the stored inputs once (process pool, ``parse`` slot) to show the user what was found (and detect
-    the marking); register the exam URLs (links sent + page URL inside each MHT) in ``exam_urls``."""
+    the marking); register the exam URLs (links sent + page URL inside each MHT) in ``exam_urls`` with the sheet's
+    language(s) (the inputs of one task are one candidate's sheet — ``parse_sources`` refuses two candidates — so
+    they share it; owner 2026-10-19: links exported per language)."""
     m, summary = await run_cpu(app, "parse", task.task_id, inspect_sheets, str(_input_dir(task)), task.data.get("hints") or {})
     urls = {it["url"] for it in task.data.get("inputs", []) if it.get("url") and it["status"] == "stored"}
     if m.url and detect_kind(m.url):
         urls.add(m.url)
+    langs, mix = sheet_langs(summary)  # the sheet's medium question by question (another language is saved as such)
     for u in urls:
         try:
-            await register_url(app.repo, u, m, task.user_id)
+            await register_url(app.repo, u, m, task.user_id, langs=langs, mix=mix)
         except Exception as e:  # registry problems never block the user
             log.warning("url registry failed: %r", e)
     return summary
@@ -77,7 +89,10 @@ def summary_text(s: dict, sections: bool = True) -> str:
     if s.get("meta_line"):
         lines.append(f"<i>{html.escape(s['meta_line'])}</i>")
     facts = [f"🧩 <b>{s['questions']}</b> questions", f"📚 <b>{len(s['sections'])}</b> section{'s' if len(s['sections']) != 1 else ''}"]
-    if s.get("languages"):
+    other = (s.get("medium") or {}).get("other")
+    if other:  # a Bengali / Tamil … sheet: the parser files it under English, the census knows better
+        facts.append("🌐 " + OTHER_LANGS.get(other, other))
+    elif s.get("languages"):
         facts.append("🌐 " + " + ".join({"en": "English", "hi": "Hindi"}.get(x, x) for x in s["languages"]))
     lines += ["", "  ·  ".join(facts)]
     if len(s["sections"]) > 1 and sections:
@@ -145,6 +160,7 @@ async def _marks(app, task, progress: ProgressMessage, *, last: bool = True) -> 
 
 
 LANG_NAMES = {"en": "English", "hi": "Hindi"}
+SLIDES_LOOK = 1  # bump when the slides PDF looks different (cached copies of the old look are not reused)
 PDF_LOOK = 4  # bump when the custom PDF looks different: cached copies of the old look are not reused (4: centred
 # banner, answer strip, explanation box, bold fix — 2026-10-15)
 
@@ -186,36 +202,151 @@ async def run_custom(app, task) -> None:
 
 
 async def _custom(app, task, progress: ProgressMessage) -> None:
-    from bot.core.tgref import download
     from bot.exam.registry import ensure
-    from bot.render.exam_pdf import render_exam_pdf
-    from bot.render.theme import app_theme
 
     prefs = task.data["prefs"]
     progress.set("📚 <b>Preparing the question paper…</b>")
     bank = await ensure(app, task)
+    answers = prefs.get("answers") or "after"
+    # admins/owner: "Each section + Full" → the full PDF, then one PDF per section (spec §13.3); others: full only
+    await custom_outputs(app, task, progress, bank, task.data.get("meta"), lang=prefs.get("lang") or "both",
+                         answers=answers, mine=bool(prefs.get("mine", True)) and answers == "after",
+                         split=prefs.get("split") == "each" and app.access.is_admin(task.user_id))
+    await progress.finish("✅ <b>Done!</b> Your scorecard and PDF are above. Send another sheet any time.")
+
+
+async def run_slides(app, task) -> None:
+    """Lane runner (heavy) for ``/slides``: read the sheet's details, the exam from the bank (reuse, else build), then
+    the slides PDF per chosen language (``custom_outputs(layout="slides")``)."""
+    from bot.exam.registry import ensure
+
+    progress = ProgressMessage(app.sender, task.chat_id, interval_s=app.settings.get("edit_interval_s"), task=task)
+    progress.attach(task.data["ui_message_id"])
+    try:
+        progress.set("📚 <b>Preparing the question paper…</b>")
+        m, _summary = await run_cpu(app, "parse", task.task_id, inspect_sheets, str(_input_dir(task)),
+                                    task.data.get("hints") or {})
+        bank = await ensure(app, task)
+        sec = await _slide_section(app, task, bank, _summary)
+        note = ""
+        if task.data["prefs"].get("style") == "original":
+            try:
+                sent = await _slides_original(app, task, progress, bank, m, sec)
+            except ValueError as e:  # boxes ≠ questions: the custom slides instead
+                log.info("slides as in the sheet %s: %s — custom slides", task.task_id, e)
+                note = "\n<i>This sheet's question boxes could not be matched, so the slides are in the custom look.</i>"
+                sent = await custom_outputs(app, task, progress, bank, m, lang="both", layout="slides", section=sec)
+        else:
+            sent = await custom_outputs(app, task, progress, bank, m, lang=task.data["prefs"].get("lang") or "both",
+                                        layout="slides", section=sec)
+        await progress.finish(f"✅ <b>Done!</b> Your slides PDF{'s are' if len(sent) > 1 else ' is'} above.{note}")
+    finally:
+        progress.close()
+
+
+async def _slide_section(app, task, bank: dict, summary: dict) -> int | None:
+    """``/slides`` 📚 Section: the card's choice (an index into the summary's sections, ``None`` = all) → the bank's
+    section index (matched by name, else the same place)."""
+    pick = task.data["prefs"].get("section")
+    names = [n for n, _c in (summary or {}).get("sections") or []]
+    if pick is None or not 0 <= int(pick) < len(names):
+        return None
+    rec = await app.repo.exams.get(bank["key"]) or {}
+    bank_names = [x.get("name", "") if isinstance(x, dict) else "" for x in rec.get("sections") or []]
+    if names[pick] in bank_names:
+        return bank_names.index(names[pick])
+    return int(pick) if int(pick) < len(bank_names) else None
+
+
+async def _slides_original(app, task, progress, bank: dict, m, section: int | None = None) -> list[str]:
+    """``/slides`` as in the sheet: the slide frames (cover, badges, answer key) from the exam bank, then the sheet's
+    own question boxes on them (``section``: only that one). ``ValueError`` when the boxes do not match the
+    questions."""
+    from bot.core.tgref import download
+    from bot.render.exam_pdf import render_exam_pdf
+    from bot.render.original_pdf import render_original_slides
+    from bot.render.theme import app_theme
+
+    rec = await app.repo.exams.get(bank["key"]) or {}
+    lang = next(iter([x for x in (m.languages or []) if x in LANG_NAMES] or rec.get("languages") or ["en"]))
+    path = bank.get("path") or str(await download(app, bank["ref"], task.workdir / "bank"))
+    secs = rec.get("sections") or []
+    sec_name = secs[section]["name"] if section is not None and section < len(secs) else None
+    name = pdf_file_name(m, None, sec_name)[:-4] + " - Slides (as in the sheet).pdf"
+    out = task.workdir / "out" / name
+    out.parent.mkdir(parents=True, exist_ok=True)
+    frames = task.workdir / "out" / "frames.pdf"
+    progress.set("🖼 <b>Building your slides</b> · as in the sheet…")
+    theme = app_theme(app)
+    font = "noto" if app.settings.get("pdf.font") == "noto" else "poppins"
+    ctx = {"bundle": path, "lang": lang, "font": font, "layout": "slides", "frame_only": True, "title": m.exam_name,
+           "meta_line": "", "lang_label": LANG_NAMES.get(lang, lang), "details": _details(m, lang), "theme": theme,
+           "colors": app.settings.get("pdf.colors"), "workdir": str(task.workdir / "img"),
+           "sections": None if sec_name is None else [section]}
+    fr = await run_cpu(app, "render", task.task_id, render_exam_pdf, ctx, str(frames), est_mb=150)
+    files = [str(p) for p in input_files(_input_dir(task))]
+    info = await run_cpu(app, "render", task.task_id, render_original_slides,
+                         {"files": files, "hints": task.data.get("hints") or {}, "theme": theme, "frames": str(frames),
+                          "body": fr["slide_body"], "first": 1, "questions": fr["questions"],
+                          "section": None if sec_name is None else section}, str(out), est_mb=300)
+    what = f" · {html.escape(sec_name)}" if sec_name else ""
+    caption = (f"🖼 <b>{html.escape(m.exam_name or 'Exam')}</b>\n<i>{html.escape(meta_line(m))}</i>\n"
+               f"Slides PDF{what} · as in the sheet · {info['pages']} pages\n{html.escape(app.config.branding)}")
+    progress.set(f"📤 <b>Sending your slides</b> · {info['pages']} pages…")
+    who = f"👤 <code>{task.user_id}</code> · task <code>{task.task_id}</code>"
+    task.outputs.append(await deliver(app, task, out, caption=f"{caption}\n{who}"[:1024], user_caption=caption))
+    return [name]
+
+
+def _details(m, lang: str) -> list[tuple[str, str]]:
+    """The cover facts of a slides PDF (page 1): date, shift, time, language."""
+    from bot.exam.keys import display_date
+    return [("Exam date", display_date(m.date) if m.date else ""), ("Shift", str(m.shift) if m.shift else ""),
+            ("Exam time", m.time or ""), ("Language", LANG_NAMES.get(lang, lang))]
+
+
+async def custom_outputs(app, task, progress, bank: dict, m, *, lang: str = "both", answers: str = "after",
+                         mine: bool = False, split: bool = False, fallback: bool = True, layout: str = "paper",
+                         section: int | None = None) -> list[str]:
+    """The custom PDFs of one exam from the bank (``registry.ensure`` result): per language the full PDF, then (``split``)
+    one per section; each delivered (dump copy + the task's chat) and, without the candidate's answers, cached in
+    ``exams.outputs`` (a repeat is a ``copy_message``). ``lang``: ``both`` or one language — missing → the exam's first
+    language (``fallback``) or nothing. ``layout="slides"`` (``/slides``): one question per landscape page, the answer
+    key grid at the end — no candidate's answers, ``answers`` ignored; ``section`` (the bank's section index) → only that
+    section, named after it (owner 2026-10-19: "kisi ek section ki bhi slide"). Returns the file names sent. Used by
+    the custom PDF task, ``/slides`` and ``/batch``."""
+    slides = layout == "slides"
+    if slides:
+        answers, mine, split = "key", False, False
+    from bot.core.tgref import download
+    from bot.render.exam_pdf import render_exam_pdf
+    from bot.render.theme import app_theme
+
     key = bank["key"]
     rec = await app.repo.exams.get(key) or {}
     # languages a whole PDF can be made in (a Hindi-medium sheet with an English part is Hindi only)
     secs = [(x.get("name", ""), x.get("count", 0)) for x in rec.get("sections") or [] if isinstance(x, dict)]
     langs = (main_languages([set(q.get("lh") or {}) for q in rec.get("qs") or []], secs or None)
              or rec.get("languages") or ["en"])
-    want = prefs.get("lang") or "both"
-    chosen_langs = langs if want == "both" else ([want] if want in langs else langs[:1])
-    answers = prefs.get("answers") or "after"
-    mine = bool(prefs.get("mine", True)) and answers == "after"
-    m = task.data.get("meta")
+    want = lang or "both"
+    chosen_langs = langs if want == "both" else ([want] if want in langs else (langs[:1] if fallback else []))
+    mine = mine and answers == "after"
     path = bank.get("path")
     outputs = rec.get("outputs") or {}
     look = pdf_look(app)
-    # admins/owner: "Each section + Full" → the full PDF, then one PDF per section (spec §13.3); others: full only
     sections = rec.get("sections") or []
-    split = prefs.get("split") == "each" and len(sections) > 1 and app.access.is_admin(task.user_id)
+    split = split and len(sections) > 1
     jobs = [(lang, idx) for lang in chosen_langs for idx in [None, *(range(len(sections)) if split else ())]]
+    if slides and section is not None and section < len(sections):
+        jobs = [(lang, section) for lang in chosen_langs]
+    sent: list[str] = []
     for n_job, (lang, idx) in enumerate(jobs, 1):
         sec_name = sections[idx]["name"] if idx is not None else None
         name = pdf_file_name(m, lang if len(chosen_langs) > 1 else None, sec_name)
-        kind = f"Section: {html.escape(sec_name)}" if sec_name else "Custom PDF"
+        if slides:
+            name = name[:-4] + " - Slides.pdf"
+        kind = (("Slides PDF" + (f" · {html.escape(sec_name)}" if sec_name else "")) if slides
+                else f"Section: {html.escape(sec_name)}" if sec_name else "Custom PDF")
         caption = (f"🧾 <b>{html.escape(m.exam_name or 'Exam')}</b>\n<i>{html.escape(meta_line(m))}</i>\n"
                    f"{kind} · {LANG_NAMES.get(lang, lang)}" + (" · your answers marked" if mine else "")
                    + f"\n{html.escape(app.config.branding)}")
@@ -223,19 +354,23 @@ async def _custom(app, task, progress: ProgressMessage) -> None:
         font = "noto" if app.settings.get("pdf.font") == "noto" else "poppins"
         cache_key = (f"custom_v{rec.get('version', 1)}_{lang}_{answers}_c{cols}_{font}_{look}_l{PDF_LOOK}"  # /ps, /wm → new PDF
                      + (f"_s{idx}" if idx is not None else ""))
+        if slides:
+            cache_key = (f"slides_v{rec.get('version', 1)}_{lang}_{font}_{look}_l{PDF_LOOK}_k{SLIDES_LOOK}"
+                         + (f"_s{idx}" if idx is not None else ""))
         count = f" ({n_job}/{len(jobs)})" if len(jobs) > 1 else ""
         cached = None if mine else outputs.get(cache_key)
         if cached:
             try:
                 await app.sender.copy(task.chat_id, cached["chat_id"], cached["message_id"], caption=caption)
                 task.outputs.append({"name": name, "size_h": "cached", "link": None})
+                sent.append(name)
                 continue
             except Exception as e:  # dump copy gone: render again
                 log.info("cached output %s unusable (%r) — rendering", cache_key, e)
         if path is None:
             progress.set("📥 <b>Loading the question paper…</b>")
             path = str(await download(app, bank["ref"], task.workdir / "bank"))
-        what = html.escape(sec_name) if sec_name else "your PDF"
+        what = html.escape(sec_name) if sec_name else "your slides" if slides else "your PDF"
         progress.set(f"🧾 <b>Building {what}</b> · {LANG_NAMES.get(lang, lang)}{count}…")
         out = task.workdir / "out" / name
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -244,14 +379,17 @@ async def _custom(app, task, progress: ProgressMessage) -> None:
                "responses": task.data.get("responses") if mine else None, "title": m.exam_name, "meta_line": meta_line(m),
                "lang_label": label, "theme": app_theme(app), "sections": None if idx is None else [idx],
                "colors": app.settings.get("pdf.colors"), "workdir": str(task.workdir / "img")}
+        if slides:  # page 1 shows the details as cards: the banner keeps only the name and the language line
+            ctx.update(layout="slides", meta_line="", lang_label=LANG_NAMES.get(lang, lang), details=_details(m, lang))
         info = await run_cpu(app, "render", task.task_id, render_exam_pdf, ctx, str(out), est_mb=150)
         progress.set(f"📤 <b>Sending {what}</b> · {info['pages']} pages{count}…")
         who = f"👤 <code>{task.user_id}</code> · task <code>{task.task_id}</code>"
         rec_out = await deliver(app, task, out, caption=f"{caption}\n{who}"[:1024], user_caption=caption)
         task.outputs.append(rec_out)
+        sent.append(name)
         if not mine and rec_out.get("ref"):
             await app.repo.exams.update(key, {"$set": {f"outputs.{cache_key}": rec_out["ref"]}})
-    await progress.finish("✅ <b>Done!</b> Your scorecard and PDF are above. Send another sheet any time.")
+    return sent
 
 
 async def run_original(app, task) -> None:
@@ -268,26 +406,43 @@ async def run_original(app, task) -> None:
 
 
 async def _original(app, task, progress: ProgressMessage) -> None:
+    files = [str(p) for p in input_files(_input_dir(task))]
+    await original_outputs(app, task, progress, task.data.get("meta"), files, hints=task.data.get("hints"))
+    await progress.finish("✅ <b>Done!</b> Your scorecard and PDF are above. Send another sheet any time.")
+
+
+async def original_outputs(app, task, progress, m, files: list[str], *, hints: dict | None = None, lang: str | None = None,
+                           sections: list | None = None) -> list[str]:
+    """The sheet in its own format (spec §14.2): the full PDF, then (``sections`` = the paper's section names, in order,
+    more than one) one PDF per section — ``/batch`` "each section + full". ``lang`` adds `` - Hindi`` / `` - English``
+    to the names (a batch makes both from two sheets). Each delivered like ``custom_outputs``; not cached (the sheet
+    shows a candidate's answers). Returns the file names sent."""
     from bot.render.original_pdf import render_original_pdf
     from bot.render.theme import app_theme
 
-    m = task.data.get("meta")
-    files = [str(p) for p in input_files(_input_dir(task))]
-    progress.set("📄 <b>Building your PDF</b> · same format as the sheet…")
-    name = pdf_file_name(m)
-    out = task.workdir / "out" / name
-    out.parent.mkdir(parents=True, exist_ok=True)
-    ctx = {"files": files, "hints": task.data.get("hints") or {}, "title": name[:-4],
-           "theme": app_theme(app)}
-    info = await run_cpu(app, "render", task.task_id, render_original_pdf, ctx, str(out), est_mb=300)
-    if info["missing"]:
-        log.info("original pdf %s: %d images not in the archive", task.task_id, info["missing"])
-    caption = (f"📄 <b>{html.escape(m.exam_name or 'Exam')}</b>\n<i>{html.escape(meta_line(m))}</i>\n"
-               f"Original PDF · {info['pages']} pages\n{html.escape(app.config.branding)}")
-    progress.set(f"📤 <b>Sending your PDF</b> · {info['pages']} pages…")
-    who = f"👤 <code>{task.user_id}</code> · task <code>{task.task_id}</code>"
-    task.outputs.append(await deliver(app, task, out, caption=f"{caption}\n{who}"[:1024], user_caption=caption))
-    await progress.finish("✅ <b>Done!</b> Your scorecard and PDF are above. Send another sheet any time.")
+    jobs = [None, *range(len(sections))] if sections and len(sections) > 1 else [None]
+    sent: list[str] = []
+    for n_job, idx in enumerate(jobs, 1):
+        sec_name = sections[idx] if idx is not None else None
+        count = f" ({n_job}/{len(jobs)})" if len(jobs) > 1 else ""
+        what = html.escape(sec_name) if sec_name else "your PDF"
+        progress.set(f"📄 <b>Building {what}</b> · same format as the sheet{count}…")
+        name = pdf_file_name(m, lang, sec_name)
+        out = task.workdir / "out" / name
+        out.parent.mkdir(parents=True, exist_ok=True)
+        ctx = {"files": files, "hints": hints or {}, "title": name[:-4], "theme": app_theme(app), "section": idx}
+        info = await run_cpu(app, "render", task.task_id, render_original_pdf, ctx, str(out), est_mb=300)
+        if info["missing"]:
+            log.info("original pdf %s: %d images not in the archive", task.task_id, info["missing"])
+        kind = f"Section: {html.escape(sec_name)}" if sec_name else "Original PDF"
+        caption = (f"📄 <b>{html.escape(m.exam_name or 'Exam')}</b>\n<i>{html.escape(meta_line(m))}</i>\n"
+                   + kind + (f" · {LANG_NAMES.get(lang, lang)}" if lang else "") + f" · {info['pages']} pages\n"
+                   + html.escape(app.config.branding))
+        progress.set(f"📤 <b>Sending {what}</b> · {info['pages']} pages{count}…")
+        who = f"👤 <code>{task.user_id}</code> · task <code>{task.task_id}</code>"
+        task.outputs.append(await deliver(app, task, out, caption=f"{caption}\n{who}"[:1024], user_caption=caption))
+        sent.append(name)
+    return sent
 
 
 def scorecard_caption(m, sc, branding: str) -> str:

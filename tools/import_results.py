@@ -26,6 +26,7 @@ from bot.exam import marking
 from bot.exam import results as R
 from bot.exam.keys import name_slug
 from bot.exam.marks import negative_from_fraction, scheme_text, score
+from bot.exam.schema import main_languages
 from bot.exam.urls import register as register_url
 from bot.net.fetcher import detect_kind
 from bot.parsers import hints_from_path, parse_source, parse_sources, source
@@ -96,7 +97,8 @@ async def main() -> int:
         if await R.save_result(repo, d, sc, user):
             saved += 1
         for u in {s.url for s in srcs if s.url and detect_kind(s.url)}:  # page URL from the MHT header → /results 🔗
-            await register_url(repo, u, d.meta, user)
+            await register_url(repo, u, d.meta, user, langs=main_languages([set(q.lang) for q in d.questions()],
+                                                                            [(x.name, len(x.questions)) for x in d.sections]))
             urls += 1
     if not a.dry_run:
         shifts = await R.rebuild_catalogue(repo)

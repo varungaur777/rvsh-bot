@@ -24,6 +24,7 @@ from pyrogram import enums
 
 from bot.broadcast import bc
 from bot.core.access import guard
+from bot.core.bg import spawn
 from bot.core.errors import UserBlockedBot
 from bot.handlers.waits import WAITERS
 from bot.ui.keyboards import btn, cb, kb, parse_cb
@@ -83,7 +84,7 @@ async def _take_message(app, message, sess) -> None:
         old.cancel()
     # albums and quick bursts arrive as many updates: one status message after they stop coming
     sess.data["bc_timer"] = asyncio.get_running_loop().call_later(
-        1.2, lambda: asyncio.ensure_future(_collect_status(app, message.chat.id, uid, sess)))
+        1.2, lambda: spawn(_collect_status(app, message.chat.id, uid, sess), "bc-status"))
 
 
 async def _collect_status(app, chat_id: int, uid: int, sess) -> None:

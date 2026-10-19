@@ -4,7 +4,7 @@ Depends on: stdlib. Used by: ``core/sender.py``, ``uploader/workers.py`` (P5).
 
 Public API
 ----------
-- ``TokenBucket(rate_per_s, burst)`` · ``await acquire(priority)`` · ``pause(seconds)`` · ``idle_for`` ·
+- ``TokenBucket(rate_per_s, burst)`` · ``await acquire(priority)`` · ``pause(seconds)`` · ``charge(n)`` · ``idle_for`` ·
   ``available()`` (tokens now; negative while paused)
   Lower ``priority`` numbers are served first; equal priorities are FIFO. Cancelled waiters are skipped.
 """
@@ -55,6 +55,11 @@ class TokenBucket:
             self._timer.cancel()
             self._timer = None
         self._schedule()
+
+    def charge(self, n: float) -> None:
+        """``n`` more messages went out than tokens were taken (an album): they are owed — later waiters wait."""
+        self._refill()
+        self.tokens -= n
 
     def available(self) -> float:
         """Tokens right now (negative while a flood-wait pause lasts) — the uploader pool's "who posts soonest"."""

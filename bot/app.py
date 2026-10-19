@@ -8,7 +8,8 @@ Public API
   dump, tasks (``TaskManager``), sessions, access, forcesub, tasklog, looplag, me (bot user), started_at.
 - ``await app.start()`` · ``await app.run_until_stopped()`` · ``await app.stop(reason)`` ·
   ``app.request_stop(reason, restart=False)``
-- hooks used by other modules: ``on_user_blocked(user_id)``, ``on_group_lost(chat_id)`` (set by quiz in P5).
+- hooks used by other modules: ``on_user_blocked(user_id)``, ``on_chat_unwritable(chat_id, why)`` (the sender),
+  ``on_group_lost(chat_id)`` (set by quiz in P5).
 
 Exceptions → outcome: a failure before the bot answers (bad token, no network) is logged and re-raised;
 ``__main__`` exits with code 1. Failures after start are reported to dump and never stop the bot.
@@ -32,6 +33,7 @@ from pyrogram import Client, enums
 from bot import __version__
 from bot.core import tgfix
 from bot.core.access import Access
+from bot.core.bg import spawn
 from bot.core.config import Config
 from bot.core.dump import DumpNotifier
 from bot.core.forcesub import ForceSub
@@ -82,6 +84,7 @@ class App:
         self.ready = asyncio.Event()
         self.boot_timings: dict[str, int] = {}
         self.max_update_lag = 0.0
+        self._unwritable_seen: dict[int, float] = {}
 
     # ------------------------------------------------------------ boot
     async def start(self) -> None:
@@ -100,7 +103,7 @@ class App:
             max_concurrent_transmissions=DEFAULTS["tg"]["max_concurrent_transmissions"],
         )
         self.client.app = self
-        self.sender = Sender(self.client, on_blocked=self.on_user_blocked)
+        self.sender = Sender(self.client, on_blocked=self.on_user_blocked, on_unwritable=self.on_chat_unwritable)
         self.fastdl = FastDownloader(self.client, DEFAULTS["tg"]["fast_download_connections"], DEFAULTS["tg"]["fast_download_part_kb"])
         self.uploads = UploaderPool(self.client, self.sender, DEFAULTS["uploader"]["per_bot_concurrency"])
         self.dump = DumpNotifier(self.uploads, self.config.dump_channel_id)  # dump notices ride the uploader team too
@@ -172,17 +175,19 @@ class App:
         self.boot_ms = int((time.perf_counter() - t0) * 1000)
         self.compute.start()  # governor sampling; the pool itself starts on the first job (or the warm-up below)
         self.ready.set()  # handlers may run now
-        loop.create_task(self._set_commands())  # not needed to answer /start
+        spawn(self._set_commands(), "set-commands")  # not needed to answer /start
         self.fastdl.connections = int(self.settings.get("tg.fast_download_connections") or 0)
         self._prewarm = loop.create_task(self.fastdl.prewarm(self.settings.get("tg.prewarm_dcs") or []))
         if self.settings.get("pool.warm_up"):  # spawn + import in the background, after the bot already answers
             self.compute.warm()
-        loop.create_task(self._results_catalogue())
-        loop.create_task(self._check_forcesub())
-        loop.create_task(self.quiz.boot_notify())  # chats whose quiz the last stop interrupted
-        loop.create_task(self._start_web())
+        spawn(self._results_catalogue(), "results-catalogue")
+        spawn(self._check_forcesub(), "forcesub-check")
+        spawn(self.quiz.boot_notify(), "quiz-boot-notice")  # chats whose quiz the last stop interrupted
+        from bot.exam.batch import boot_notice
+        spawn(boot_notice(self), "batch-resume-notice")  # /batch runs a restart cut short → "Resume?"
+        spawn(self._start_web(), "web-app")
         from bot.handlers.update import boot_report
-        loop.create_task(boot_report(self))  # after a /update: "back on the new code"
+        spawn(boot_report(self), "update-report")  # after a /update: "back on the new code"
         self.autoquiz.start()
         uploaders.add_done_callback(lambda _: self.dump.notify(self.startup_report()))
         log.info("bot @%s ready in %d ms (%s)", self.me.username, self.boot_ms,
@@ -234,6 +239,9 @@ class App:
                      BotCommand("json_batch", "Reply to a .zip of JSON files: all of them"),
                      BotCommand("cancel", "Cancel your task"), BotCommand("q", "Your queue position")]
         admin_cmds = user_cmds + [BotCommand("results", "Result PDF of an exam (averages)"),
+                                  BotCommand("links", "Exam links: Hindi + English .txt (reply to a list: check it)"),
+                                  BotCommand("batch", "PDFs of many exam links (reply to a list, or pick an exam)"),
+                                  BotCommand("slides", "Exam link / .mht → one question per page PDF"),
                                   BotCommand("bc", "Broadcast to users or groups"), BotCommand("stopbc", "Stop the broadcast"),
                                   BotCommand("msg", "Message a user"),
                                   BotCommand("task", "Running and waiting tasks"), BotCommand("cq", "Clear queue / cancel all"),
@@ -309,12 +317,33 @@ class App:
         except Exception:
             pass
 
+    async def on_chat_unwritable(self, chat_id: int, why: str) -> None:
+        """A group refused a send (no right to post, slow mode, gone — Err.txt 2026-10-19): remembered on its
+        ``groups`` doc (``can_write: false`` / ``present: false``; ``/groups`` shows it, auto quiz skips it) at most
+        once per 10 minutes per chat. The bot being promoted / re-added (``core.events``) sets ``can_write`` again."""
+        now = time.monotonic()
+        seen = self._unwritable_seen
+        if now - seen.get(chat_id, -1e9) < 600 or chat_id in (self.config.dump_channel_id, self.config.image_dump_channel_id):
+            return
+        if len(seen) > 5000:
+            seen.clear()
+        seen[chat_id] = now
+        fields = {"present": False} if why == "gone" else {"can_write": False}
+        try:
+            await self.repo.groups.update(chat_id, {"$set": {**fields, "last_error": why}}, upsert=False)
+        except Exception as e:
+            log.debug("groups.can_write not saved for %s: %r", chat_id, e)
+
     async def _task_closed(self, task) -> None:
         self.sessions.clear(task.user_id)
         await self.tasklog.finished(task)
 
     async def _task_error(self, task, exc: BaseException) -> None:
         from bot.core.errors import BotError
+        from bot.core.sender import undeliverable
+        if undeliverable(exc):  # the user blocked the bot / the chat refuses it: nobody to tell, nothing to report
+            log.info("task %s (%s) ended: %s", task.task_id, task.kind, undeliverable(exc))
+            return
         key = getattr(exc, "key", "")
         text = t(f"error_{key}") if isinstance(exc, BotError) else ""
         if not text or text == f"error_{key}":

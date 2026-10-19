@@ -47,7 +47,7 @@ from pathlib import Path
 from pyrogram import errors as tg_errors
 from pyrogram import raw, utils
 
-from bot.core.sender import LOG, NO_PREVIEW, Sender
+from bot.core.sender import LOG, NO_PREVIEW, REPLY_ERRORS, Sender
 
 log = logging.getLogger(__name__)
 
@@ -76,6 +76,12 @@ async def send_uploaded(client, chat_id, file, path: str, *, kind: str, caption:
         except tg_errors.FilePartMissing as e:
             part = getattr(e, "file_part", None)
             await client.save_file(path, file_id=file.id, file_part=int(part if part is not None else e.value))
+            continue
+        except REPLY_ERRORS:  # the anchor it replies to was deleted from the dump: post without the reply
+            if not reply_to:
+                raise
+            log.info("dump post: reply target %s gone — posted without the reply", reply_to)
+            reply_to = None
             continue
         msgs = await utils.parse_messages(client=client, messages=r)
         return msgs[0] if msgs else None

@@ -29,6 +29,17 @@ Layout
   own answer key (``lang.<code>.correct``) wins over the question's.
 - Candidate's choices (``chosen``: ``{q_hash: index}``, ``after`` mode only): the chosen option is printed **green
   (right) / red (wrong)** in a box that **hugs the content** — the text lines only, or the image.
+- A question's ``tag`` (``/batch`` merged sections / one-liners, ``bundle.merge_sections``: ``exam • date • shift``)
+  is printed under it in small grey type.
+- ``index`` (``/batch`` merged sections / one-liners, owner 2026-10-19: "merged vali sabhi pdf mai index page bhi
+  bnao, usme shifts likh do konsi konsi hai, aur kis page se hai, page ka link bhi"): page 1 after the title is an
+  index — every section (= a shift) with its questions and the page it starts on, linked; the PDF's bookmarks list
+  them too. Built twice (``index_pages``: the first pass finds the pages, the second prints them).
+- ``layout``: ``paper`` (default, above) · ``slides`` (``/slides``: A4 landscape, a cover page with the exam's
+  details, one question per page with a ``Q n / N`` badge in the top-right corner, scaled to fill the page, the
+  answer key grid at the end; ``frame_only``: the question pages keep only their top line, for the sheet's own boxes
+  — ``original_pdf.render_original_slides``) · ``oneliner`` (``/batch`` mode 4: the question and its answer — ``Ans: (b)`` + that
+  option — directly under it, no options, no answer key; compact 2 columns).
 
 Public API: ``render_exam_pdf(ctx, out_path) -> dict`` (``{"pages", "questions", "columns", "wide", "ms"}``;
 ``wide`` = questions printed full width). ``ctx``:
@@ -60,6 +71,9 @@ FONT = 9.5
 INLINE_H = 24.0  # pt: taller images are placed as blocks
 LABELS = "abcdefghij"
 MAX_IMG_H = 560.0  # pt: a taller image is shrunk (a question block must fit one page)
+SLIDE_ZOOM = 1.3  # slides (``layout: slides``): text and images this much bigger on the landscape page
+SLIDE_GROW = 1.5  # … and a short question up to this much bigger again, to fill its page
+SLIDE_GROW_TEXT = 1.8  # … a question of text only (no picture to blur)
 SHRINK_MIN = 0.8  # a column image smaller than this share of its size → that question goes full width
 DEFAULTS = {"question_no": "#000000", "question": "#1a237e", "options": "#000000", "label": "#000000",
             "correct": "#2e7d32", "chosen_right": "#2e7d32", "chosen_wrong": "#c62828",
@@ -121,8 +135,9 @@ class _Images:
     older bundles are cropped to ``content_bbox`` here. ``fit()`` wraps a text strip wider than its column at word
     gaps (reflow) instead of shrinking its text."""
 
-    def __init__(self, zip_path: str, workdir: Path) -> None:
+    def __init__(self, zip_path: str, workdir: Path, zoom: float = 1.0) -> None:
         self.z = zipfile.ZipFile(zip_path)
+        self.zoom = zoom  # slides: text and images a bit bigger, so image text stays as big as the PDF text
         self.dir = workdir
         self.dir.mkdir(parents=True, exist_ok=True)
         self.cache: dict[str, tuple[str, int, int]] = {}
@@ -159,7 +174,7 @@ class _Images:
     def fit_k(self, img: dict, max_w_pt: float) -> tuple[str, float, float, float]:
         """``fit`` plus the shrink factor (1.0 = the image keeps its size; a reflowed strip keeps its text size)."""
         path, w, h = self.get(img)
-        s = img.get("scale") or PX
+        s = (img.get("scale") or PX) * self.zoom
         if w * s <= max_w_pt:
             return path, w * s, h * s, 1.0
         lines = img.get("lines") or []
@@ -382,6 +397,11 @@ def _flowables():
 
         def draw(self):
             c, w, h = self.canv, self.width, self.height
+            anchor = getattr(self, "anchor", None)
+            if anchor:  # index target: a named place + a PDF bookmark, its page noted for the index
+                c.bookmarkPage(anchor[0])
+                c.addOutlineEntry(anchor[1], anchor[0], level=0, closed=True)
+                anchor[2][anchor[0]] = c.getPageNumber()
             T.banner(c, self.th, 1, 1, w - 2, h - 2, radius=self.radius)
             c.saveState()  # glass highlight: a thin white line just inside the border
             c.setStrokeColor(T.color("#ffffff"), alpha=0.9)
@@ -676,6 +696,9 @@ def _flowables():
 
 # ------------------------------------------------------------------ builder
 def render_exam_pdf(ctx: dict, out_path: str) -> dict:
+    if ctx.get("index") and ctx.get("index_pages") is None:  # pass 1 finds each section's page, pass 2 prints them
+        first = render_exam_pdf({**ctx, "index_pages": {}}, out_path)
+        return render_exam_pdf({**ctx, "index_pages": first["anchors"]}, out_path)
     t0 = time.perf_counter()
     from reportlab.lib.styles import ParagraphStyle
     from reportlab.platypus import (BaseDocTemplate, Frame, HRFlowable, Image, KeepTogether, NextPageTemplate,
@@ -709,21 +732,29 @@ def render_exam_pdf(ctx: dict, out_path: str) -> dict:
         n += len(s["questions"])
     picked = [i for i in range(len(doc["sections"])) if ctx.get("sections") is None or i in ctx["sections"]]
     secs = [doc["sections"][i] for i in picked]
-    images = _Images(ctx["bundle"], Path(ctx.get("workdir") or Path(out_path).parent / "_img"))
+    # slides (``/slides``): A4 landscape, one question per page, text and images ``SLIDE_ZOOM`` bigger
+    slides = ctx.get("layout") == "slides"
+    oneliner = ctx.get("layout") == "oneliner"
+    z = SLIDE_ZOOM if slides else 1.0
+    page_w, page_h = (PAGE_H, PAGE_W) if slides else (PAGE_W, PAGE_H)
+    font = FONT * z
+    if slides or oneliner:  # slides: only the answer key grid at the end (built below); one-liner: the answer line
+        answers, explain, chosen = "none", "none", None
+    images = _Images(ctx["bundle"], Path(ctx.get("workdir") or Path(out_path).parent / "_img"), zoom=z)
 
     def content(q: dict) -> dict:
         return q["lang"].get(lang) or next(iter(q["lang"].values()))
 
-    cols = 1 if str(ctx.get("columns") or 2) == "1" else 2  # 2 = hybrid (a wide question spans the page)
-    usable_w = PAGE_W - 2 * MARGIN
-    body_h = PAGE_H - 2 * MARGIN - 6
+    cols = 1 if slides or str(ctx.get("columns") or 2) == "1" else 2  # 2 = hybrid (a wide question spans the page)
+    usable_w = page_w - 2 * MARGIN
+    body_h = page_h - 2 * MARGIN - 6
     col_w = usable_w if cols == 1 else (usable_w - GAP) / 2
 
-    st_q = ParagraphStyle("q", fontName=LB, fontSize=FONT, leading=FONT * 1.38, textColor=C["question"], shaping=1)
-    st_o = ParagraphStyle("o", fontName=LR, fontSize=FONT, leading=FONT * 1.35, textColor=C["options"], shaping=1,
-                          leftIndent=14, firstLineIndent=-14)
-    st_ans = ParagraphStyle("a", fontName=LSB, fontSize=FONT - 0.5, leading=FONT * 1.3, textColor=C["correct"], shaping=1)
-    st_x = ParagraphStyle("x", fontName=LR, fontSize=FONT - 0.5, leading=(FONT - 0.5) * 1.4, textColor=C["options"], shaping=1)
+    st_q = ParagraphStyle("q", fontName=LB, fontSize=font, leading=font * 1.38, textColor=C["question"], shaping=1)
+    st_o = ParagraphStyle("o", fontName=LR, fontSize=font, leading=font * 1.35, textColor=C["options"], shaping=1,
+                          leftIndent=14 * z, firstLineIndent=-14 * z)
+    st_ans = ParagraphStyle("a", fontName=LSB, fontSize=font - 0.5, leading=font * 1.3, textColor=C["correct"], shaping=1)
+    st_x = ParagraphStyle("x", fontName=LR, fontSize=font - 0.5, leading=(font - 0.5) * 1.4, textColor=C["options"], shaping=1)
 
     def fit(st, markup: str, inline: dict):
         """A paragraph holding an inline picture taller than its line (a fraction): lines grow to fit it and a
@@ -735,6 +766,8 @@ def render_exam_pdf(ctx: dict, out_path: str) -> dict:
         return ParagraphStyle(st.name + "t", parent=st, autoLeading="max", spaceBefore=st.spaceBefore + pad,
                               spaceAfter=st.spaceAfter + pad)
     muted = T.color(th["colors"]["muted"])
+    st_tag = ParagraphStyle("tg", fontName=LR, fontSize=font - 2, leading=(font - 2) * 1.3, textColor=muted, shaping=1,
+                            spaceBefore=1)
 
     def img_map(q: dict, c: dict, max_w: float) -> tuple[dict, list[str]]:
         """Small images (formulas, symbols — at most ``INLINE_H`` tall) go inline in the text; image-only parts and
@@ -742,13 +775,13 @@ def render_exam_pdf(ctx: dict, out_path: str) -> dict:
         inline, blocks = {}, []
         for im in q.get("images") or []:
             path, w, h = images.get(im)
-            sc = im.get("scale") or PX
+            sc = (im.get("scale") or PX) * z
             markup = c["question"] if im["role"] == "question" else (c.get("explanation") or "") if im["role"] == "explanation" else (
                 c["options"][int(im["role"].split("_")[1]) - 1] if im["role"].startswith("option_")
                 and int(im["role"].split("_")[1]) <= len(c["options"]) else "")
             if f'"{im["id"]}"' not in markup:
                 continue  # an image of the other language
-            if not im.get("broken") and rl_text.plain_has_text(markup) and h * sc <= INLINE_H and w * sc <= max_w:
+            if not im.get("broken") and rl_text.plain_has_text(markup) and h * sc <= INLINE_H * z and w * sc <= max_w:
                 inline[im["id"]] = (path, w * sc, h * sc)  # formulas / symbols at text size, in the line
             else:
                 blocks.append(im["id"])
@@ -768,11 +801,11 @@ def render_exam_pdf(ctx: dict, out_path: str) -> dict:
     def valign(img) -> str:
         """An option image of one text line: its label in the middle; taller (2+ lines, a figure): at the top, level
         with the first line."""
-        return "MIDDLE" if getattr(img, "drawHeight", 99) <= FONT * 2 else "TOP"
+        return "MIDDLE" if getattr(img, "drawHeight", 99) <= font * 2 else "TOP"
 
     zebra = T.color(th["colors"].get("zebra") or "#f7f7f9")
     rule = T.color(th["colors"].get("rule") or "#d0d0d0")
-    st_c = ParagraphStyle("c", fontName=LR, fontSize=FONT - 1, leading=(FONT - 1) * 1.32, textColor=C["options"],
+    st_c = ParagraphStyle("c", fontName=LR, fontSize=font - 1, leading=(font - 1) * 1.32, textColor=C["options"],
                           shaping=1)
 
     def text_w(text: str, size: float) -> float:
@@ -801,7 +834,7 @@ def render_exam_pdf(ctx: dict, out_path: str) -> dict:
 
     def table_widths(q: dict, rows: list, avail: float) -> tuple[list, list]:
         """Per column: (natural width on one line, narrowest width — its longest word or 50 pt of a picture)."""
-        n, pad, size = len(rows[0]), 8.0, FONT - 1
+        n, pad, size = len(rows[0]), 8.0, font - 1
         nat, least = [pad] * n, [pad] * n
         for r in rows:
             for i, cell in enumerate(r):
@@ -899,14 +932,16 @@ def render_exam_pdf(ctx: dict, out_path: str) -> dict:
         heads = [label] if head is None else [head, label]
         return Boxed([*heads, *body], C["explain_fill"], C["explain_head"], headed=len(heads))
 
-    def question_flow(n: int, q: dict, col_w: float = col_w, in_cols: bool = False) -> list:
+    def question_flow(n: int, q: dict, col_w: float = col_w, in_cols: bool = False, bare: bool = False) -> list:
+        """A question's flowables. ``bare`` (slides): its parts only — no ``Q12.`` (the page's corner badge shows
+        it), no rule, nothing kept together (the slide fits them to the page)."""
         c = content(q)
         inline, blocks = img_map(q, c, col_w - 16)
-        num = f'<font name="{LB}" color="{colors["question_no"]}">Q{n}.</font> '
+        num = "" if bare else f'<font name="{LB}" color="{colors["question_no"]}">Q{n}.</font> '
         parts = []
         for kind, val in segments(c["question"]) or [("text", "")]:
             if kind == "table":
-                if not parts:
+                if not parts and num:
                     parts.append(Paragraph(num, st_q))
                 parts.append(table_flow(q, val, col_w - 4))
                 continue
@@ -916,14 +951,35 @@ def render_exam_pdf(ctx: dict, out_path: str) -> dict:
                 parts.append(block_image(q, aid, col_w - 4))
         correct = correct_of(q, lang)
         mine = (chosen or {}).get(q.get("qref") or q["q_hash"]) if chosen is not None else None
-        for i, opt in enumerate(c["options"]):
+        if oneliner:  # the answer straight under the question: "Ans: (b)" + that option (text, or its picture)
+            ok = correct is not None and correct < len(c["options"])
+            opt = c["options"][correct] if ok else ""
+            head = f'<font name="{LSB}" color="{colors["correct"]}">Ans: {f"({LABELS[correct]})" if ok else "dropped by the board"}</font>'
+            opt_blocks = [b for b in blocks if f'"{b}"' in opt]
+            text = opt
+            for b in opt_blocks:
+                text = text.replace(f'<img id="{b}"/>', " ")
+            if opt_blocks and not rl_text.plain_has_text(text) and "<img" not in text:  # a picture only: beside "Ans"
+                img = block_image(q, opt_blocks[0], col_w - 56 * z)
+                row = Table([[Paragraph(head, st_o), img]], colWidths=[52 * z, None], hAlign="LEFT")
+                row.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), valign(img)), ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                                         ("RIGHTPADDING", (0, 0), (-1, -1), 2), ("TOPPADDING", (0, 0), (-1, -1), 1),
+                                         ("BOTTOMPADDING", (0, 0), (-1, -1), 1)]))
+                parts.append(row)
+                opt_blocks = opt_blocks[1:]
+            else:
+                body = rl_text.to_para(text, "r", inline) if rl_text.plain_has_text(text) or "<img" in text else ""
+                parts.append(Paragraph(f"{head} {body}", fit(st_o, text, inline)))
+            for b in opt_blocks:
+                parts.append(Indent(block_image(q, b, col_w - 30), 14 * z))
+        for i, opt in enumerate([] if oneliner else c["options"]):
             color = (colors["chosen_right"] if i == correct else colors["chosen_wrong"]) if mine == i else colors["options"]
             label = f'<font name="{LB}" color="{color if mine == i else colors["label"]}">({LABELS[i]})</font>'
             text = rl_text.to_para(opt, "r", inline)
             opt_blocks = [b for b in blocks if f'"{b}"' in opt]
             if opt_blocks and not rl_text.plain_has_text(opt):
                 img = block_image(q, opt_blocks[0], col_w - 30)
-                row = Table([[Paragraph(label, st_o), img]], colWidths=[20, None],
+                row = Table([[Paragraph(label, st_o), img]], colWidths=[20 * z, None],
                             hAlign="LEFT")
                 row.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), valign(img)), ("LEFTPADDING", (0, 0), (-1, -1), 0),
                                          ("RIGHTPADDING", (0, 0), (-1, -1), 2), ("TOPPADDING", (0, 0), (-1, -1), 1),
@@ -932,19 +988,24 @@ def render_exam_pdf(ctx: dict, out_path: str) -> dict:
                 if mine == i:
                     flow = Table([[Paragraph(label, st_o),
                                    HugBox(img, C["chosen_right"] if i == correct else C["chosen_wrong"])]],
-                                 colWidths=[20, None], hAlign="LEFT")
+                                 colWidths=[20 * z, None], hAlign="LEFT")
                     flow.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), valign(img)), ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                                              ("RIGHTPADDING", (0, 0), (-1, -1), 2),  # as the row above: "(a)" on one line
                                               ("TOPPADDING", (0, 0), (-1, -1), 1), ("BOTTOMPADDING", (0, 0), (-1, -1), 1)]))
             else:
                 para = Paragraph(f'{label} <font color="{color}">{text}</font>', fit(st_o, opt, inline))
                 flow = HugBox(para, C["chosen_right"] if i == correct else C["chosen_wrong"]) if mine == i else para
                 parts.append(flow)
                 for b in opt_blocks:  # a big image under the option's text, in line with that text
-                    parts.append(Indent(block_image(q, b, col_w - 30), 14))
+                    parts.append(Indent(block_image(q, b, col_w - 30), 14 * z))
                 continue
             parts.append(flow)
         if answers == "after":  # in a see-through strip of the answer colour (owner 2026-10-15)
             parts.append(Strip(Paragraph(f"Answer: {answer_text(q, c)}", st_ans), C["correct"]))
+        if q.get("tag"):  # merged sections / one-liners: where this question is from
+            parts.append(Paragraph(rl_text.to_para(html_mod.escape(q["tag"]), "r"), st_tag))
+        if bare:
+            return parts
         line = HRFlowable(width="100%", thickness=0.4, color=rule, spaceBefore=4, spaceAfter=5)
         box = expl_box(q, col_w) if explain == "after" else None
         if box is not None:
@@ -959,13 +1020,223 @@ def render_exam_pdf(ctx: dict, out_path: str) -> dict:
                                      "" if "question" in meta.lower() else f"{n_all} questions") if x)
     title = Banner(th, [(ctx.get("title") or doc["meta"].get("exam_name") or "Exam", "b", 16, border),
                         (meta, "sb", 9.5, text_c), (info, "r", 8.5, muted)], pad=11, rule=True, radius=10)
-    story += [NextPageTemplate("later"), title, Spacer(1, 9)]
+    def slide_story() -> tuple[list, int]:
+        """``/slides`` (owner 2026-10-19: "1 question 1 page par ho, anskey grid last mai, page landscape mai ho,
+        question right above corner mai, with header and footer, 1st page par exam detail ho bhdia se likha ho"):
+        a cover page with the exam's details, then one question per A4-landscape page — its section on the left,
+        a ``Q 12 / 100`` badge in the top-right corner, the question shrunk to the page when taller — then the
+        answer key grid of every section. Header / footer / page number / watermark as in every PDF."""
+        from reportlab.lib.colors import white
+        from reportlab.pdfbase.pdfmetrics import stringWidth
+        from reportlab.platypus import Flowable, KeepInFrame, PageBreak
+
+        accent = T.color(th["colors"].get("header") or "#1a237e")
+        fill = T.color(th["colors"].get("banner_fill") or "#eeeeee")
+        total = sum(len(s["questions"]) for s in doc["sections"])  # the badge keeps the paper's numbers: Q 26 / 100
+        st_sec = ParagraphStyle("ss", fontName=LSB, fontSize=10.5, leading=13, textColor=muted, shaping=1)
+
+        class Fit(Flowable):
+            """A question's parts as one block scaled to the page: shrunk when taller than ``max_h``, grown (up to
+            ``SLIDE_GROW``) when short — a slide reads better big. Never wider than the page: pictures and tables keep
+            their size inside, so the growth stops where the widest one would pass the edge."""
+
+            def __init__(self, parts, max_h: float) -> None:
+                super().__init__()
+                self.parts, self.max_h = parts, max_h
+
+            def _fixed_w(self) -> float:
+                w = 0.0
+                for p in self.parts:
+                    if isinstance(p, Paragraph):
+                        continue
+                    w = max(w, p.minWidth() if isinstance(p, Table) else p.wrap(10_000, 10_000)[0])
+                return w
+
+            def _height(self, w: float) -> float:
+                return sum(p.getSpaceBefore() + p.wrap(w, 10_000)[1] + p.getSpaceAfter() for p in self.parts)
+
+            def wrap(self, aw, ah):
+                fixed = self._fixed_w()  # 0: text only (it may grow more: no picture gets blurred)
+                top = min(SLIDE_GROW, aw / fixed) if fixed else SLIDE_GROW_TEXT
+                if top * self._height(aw / top) <= self.max_h:
+                    k = top
+                else:  # the largest scale that fits (taller as it grows: narrower lines wrap more)
+                    lo, hi = 0.2, top
+                    for _ in range(18):
+                        mid = (lo + hi) / 2
+                        lo, hi = (mid, hi) if mid * self._height(aw / mid) <= self.max_h else (lo, mid)
+                    k = lo
+                self.k, self.inner_w = k, aw / k
+                self.sizes = [(p, p.getSpaceBefore(), p.wrap(self.inner_w, 10_000)[1], p.getSpaceAfter()) for p in self.parts]
+                self.width, self.height = aw, k * sum(b + h + a for _p, b, h, a in self.sizes)
+                return self.width, self.height
+
+            def draw(self):
+                c = self.canv
+                c.saveState()
+                c.scale(self.k, self.k)
+                y = self.height / self.k
+                for p, b, h, a in self.sizes:
+                    y -= b + h
+                    p.drawOn(c, 0, y)
+                    y -= a
+                c.restoreState()
+
+        class SlideHead(Flowable):
+            """The top line of a question page: section (left), ``Q n / N`` badge (top-right corner), a thin rule."""
+            H = 32.0
+
+            def __init__(self, section: str, n: int) -> None:
+                super().__init__()
+                self.section, self.n = section, n
+
+            def wrap(self, aw, ah):
+                self.width, self.height = aw, self.H
+                return self.width, self.height
+
+            def draw(self):
+                c = self.canv
+                big, small = f"Q {self.n}", f"/ {total}"
+                wb, ws = stringWidth(big, LB, 15), stringWidth(small, LSB, 10)
+                bw, bh = wb + ws + 28, 24.0
+                x0, y0 = self.width - bw, self.H - bh - 1
+                c.saveState()
+                c.setFillColor(accent)
+                c.roundRect(x0, y0, bw, bh, 8, stroke=0, fill=1)
+                c.setFillColor(white)
+                c.setFont(LB, 15)
+                c.drawString(x0 + 12, y0 + 7, big)
+                c.setFillColor(white, alpha=0.85)
+                c.setFont(LSB, 10)
+                c.drawString(x0 + 16 + wb, y0 + 7.5, small)
+                c.restoreState()
+                para = Paragraph(rl_text.to_para(self.section[:120], "sb"), st_sec)
+                _w, ph = para.wrap(x0 - 16, bh)
+                para.drawOn(c, 0, y0 + max(0.0, (bh - ph) / 2))
+                c.saveState()
+                c.setStrokeColor(rule)
+                c.setLineWidth(0.7)
+                c.line(0, 1, self.width, 1)
+                c.restoreState()
+
+        def card_table(data, widths, head: bool):
+            t = Table(data, colWidths=widths, hAlign="CENTER")
+            style = [("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("BOX", (0, 0), (-1, -1), 1.2, border),
+                     ("ROUNDEDCORNERS", [8, 8, 8, 8]), ("LEFTPADDING", (0, 0), (-1, -1), 8),
+                     ("RIGHTPADDING", (0, 0), (-1, -1), 8), ("TOPPADDING", (0, 0), (-1, -1), 6),
+                     ("BOTTOMPADDING", (0, 0), (-1, -1), 7)]
+            if head:
+                style += [("BACKGROUND", (0, 0), (-1, 0), accent), ("ROWBACKGROUNDS", (0, 1), (-1, -1), [None, zebra]),
+                          ("LINEBELOW", (0, 1), (-1, -2), 0.4, rule)]
+            else:
+                style += [("BACKGROUND", (0, 0), (-1, -1), fill), ("LINEAFTER", (0, 0), (-2, -1), 0.6, rule)]
+            t.setStyle(TableStyle(style))
+            return t
+
+        out: list = [NextPageTemplate("later")]
+        cover = [Banner(th, [(ctx.get("title") or doc["meta"].get("exam_name") or "Exam", "b", 24, border),
+                             (meta, "sb", 13, text_c), (info, "r", 11, muted)], pad=18, rule=True, radius=12),
+                 Spacer(1, 18)]
+        st_lab = ParagraphStyle("cl", fontName=LSB, fontSize=9.5, leading=12, textColor=muted, alignment=1, shaping=1)
+        st_val = ParagraphStyle("cv", fontName=LB, fontSize=13, leading=16, textColor=text_c, alignment=1, shaping=1)
+        facts = [(k, str(v)) for k, v in (ctx.get("details") or []) if v]
+        facts += [("Questions", str(sum(len(s["questions"]) for s in secs))), ("Sections", str(len(secs)))]
+        need = [max(stringWidth(v, LB, 13), stringWidth(k, LSB, 9.5)) + 20 for k, v in facts]  # one line each
+        extra = max(0.0, usable_w - sum(need)) / len(facts)
+        widths = [x + extra for x in need] if sum(need) <= usable_w else [usable_w / len(facts)] * len(facts)
+        cover.append(card_table([[[Paragraph(rl_text.to_para(k, "sb"), st_lab), Spacer(1, 3),
+                                   Paragraph(rl_text.to_para(v, "b"), st_val)] for k, v in facts]], widths, head=False))
+        cover.append(Spacer(1, 18))
+        st_th = ParagraphStyle("th", fontName=LB, fontSize=10.5, leading=13, textColor=white, shaping=1)
+        st_td = ParagraphStyle("td", fontName=LR, fontSize=10.5, leading=13.5, textColor=text_c, shaping=1)
+        st_tb = ParagraphStyle("tb", parent=st_td, fontName=LSB)
+        rows = [[Paragraph(x, st_th) for x in ("#", "Section", "Questions", "Question numbers")]]
+        for i, sec in zip(picked, secs):  # one section (``/slides`` 📚 Section): only that one
+            a, b = first_no[i] + 1, first_no[i] + len(sec["questions"])
+            rows.append([Paragraph(str(i + 1), st_td), Paragraph(rl_text.to_para(sec["name"], "sb"), st_tb),
+                         Paragraph(str(b - a + 1), st_td), Paragraph(f"Q{a} – Q{b}" if b > a else f"Q{a}", st_td)])
+        cover.append(card_table(rows, [34, usable_w - 34 - 90 - 150, 90, 150], head=True))
+        cover += [Spacer(1, 16), Paragraph("One question per page  ·  answer key at the end",
+                                           ParagraphStyle("cn", parent=st_lab, fontSize=10.5, leading=13))]
+        out += [KeepInFrame(usable_w, body_h - 2, cover, mode="shrink"), PageBreak()]
+
+        n, keys = 0, []
+        for idx, sec in zip(picked, secs):
+            mine = []
+            for k, q in enumerate(sec["questions"], first_no[idx] + 1):
+                n += 1
+                c = content(q)
+                ck = correct_of(q, lang)
+                mine.append((k, ck if ck is not None and ck < len(c["options"]) else None))
+                if ctx.get("frame_only"):  # /slides as in the sheet: the sheet's own box goes here (original_pdf)
+                    out += [SlideHead(sec["name"], k), PageBreak()]
+                    continue
+                room = body_h - SlideHead.H - 16
+                for g in (SLIDE_GROW, 1.0):  # built narrower, then grown: text strips re-wrap to the narrow width
+                    fit = Fit(question_flow(k, q, usable_w / g, bare=True), room)
+                    fit.wrap(usable_w, room)
+                    if fit.k >= g - 0.01:
+                        break
+                out += [SlideHead(sec["name"], k), Spacer(1, 12), fit, PageBreak()]
+            keys.append((sec, mine))
+
+        out += [Banner(th, [("Answer key", "b", 18, border), (f"{n} questions", "r", 10.5, muted)], pad=10, radius=10),
+                Spacer(1, 12)]
+        per, dropped = 10, False
+        st_kh = ParagraphStyle("kh", parent=st_q, fontName=LB, fontSize=12, leading=15, textColor=accent)
+        for sec, mine in keys:
+            cells = []
+            for k, ck in mine:
+                dropped = dropped or ck is None
+                cells.append(f"{k}  –  ({LABELS[ck]})" if ck is not None else f"{k}  –  ×")
+            grid_rows = [cells[i:i + per] + [""] * (per - len(cells[i:i + per])) for i in range(0, len(cells), per)]
+            grid = Table(grid_rows, colWidths=[usable_w / per] * per, hAlign="LEFT")
+            grid.setStyle(TableStyle([("FONT", (0, 0), (-1, -1), LSB, 10.5), ("TEXTCOLOR", (0, 0), (-1, -1), C["correct"]),
+                                      ("ALIGN", (0, 0), (-1, -1), "CENTER"), ("GRID", (0, 0), (-1, -1), 0.5, rule),
+                                      ("ROWBACKGROUNDS", (0, 0), (-1, -1), [zebra, None]),
+                                      ("TOPPADDING", (0, 0), (-1, -1), 5), ("BOTTOMPADDING", (0, 0), (-1, -1), 6)]))
+            out += [KeepTogether([Paragraph(rl_text.to_para(sec["name"], "b"), st_kh), Spacer(1, 4), grid]),
+                    Spacer(1, 12)]
+        if dropped:
+            out.append(Paragraph("× = question dropped by the board", ParagraphStyle("kd", parent=st_lab, alignment=0)))
+        return out, n
+
     n_q, n_wide = 0, 0
-    for idx, sec in zip(picked, secs):
+    if slides:
+        story, n_q = slide_story()
+    else:
+        story += [NextPageTemplate("later"), title, Spacer(1, 9)]
+    found: dict[str, int] = {}
+    pages_of = ctx.get("index_pages")
+    if ctx.get("index") and not slides:
+        from reportlab.platypus import PageBreak
+
+        accent = T.color(th["colors"].get("header") or "#1a237e")
+        st_ih = ParagraphStyle("ih", fontName=LB, fontSize=9.5, leading=12, textColor=T.color("#ffffff"), shaping=1)
+        st_ic = ParagraphStyle("ic", fontName=LR, fontSize=9.5, leading=12.5, textColor=text_c, shaping=1)
+        st_il = ParagraphStyle("il", parent=st_ic, fontName=LSB, textColor=accent)
+        rows = [[Paragraph(x, st_ih) for x in ("#", "Shift", "Questions", "Starts on")]]
+        for n, (idx, sec) in enumerate(zip(picked, secs), 1):
+            a, b = first_no[idx] + 1, first_no[idx] + len(sec["questions"])
+            pg = (pages_of or {}).get(f"s{idx}")
+            go = f'<a href="#s{idx}">page {pg if pg else "00"}</a>'
+            rows.append([Paragraph(str(n), st_ic), Paragraph(f'<a href="#s{idx}">{rl_text.to_para(sec["name"], "sb")}</a>', st_il),
+                         Paragraph(f"{b - a + 1}  ·  Q{a}–Q{b}" if b > a else f"1  ·  Q{a}", st_ic), Paragraph(go, st_il)])
+        table = Table(rows, colWidths=[28, usable_w - 28 - 120 - 80, 120, 80], repeatRows=1, hAlign="LEFT")
+        table.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, 0), accent), ("ROWBACKGROUNDS", (0, 1), (-1, -1), [None, zebra]),
+                                   ("BOX", (0, 0), (-1, -1), 1, border), ("LINEBELOW", (0, 1), (-1, -2), 0.4, rule),
+                                   ("ROUNDEDCORNERS", [6, 6, 6, 6]), ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                                   ("TOPPADDING", (0, 0), (-1, -1), 4), ("BOTTOMPADDING", (0, 0), (-1, -1), 5)]))
+        story += [Banner(th, [("Index", "b", 12, border), (f"{len(secs)} shifts  ·  tap a shift or its page to go there",
+                                                           "r", 7.5, muted)], pad=6, radius=8),
+                  Spacer(1, 8), table, PageBreak()]
+    for idx, sec in ([] if slides else zip(picked, secs)):
         a, b = first_no[idx] + 1, first_no[idx] + len(sec["questions"])
         story.append(Banner(th, [(sec["name"], "b", 10.5, border),
                                  (f"{b - a + 1} questions  ·  Q{a}–Q{b}" if b > a else f"1 question  ·  Q{a}", "r", 7.5, muted)],
                             pad=5, radius=7))
+        if ctx.get("index"):
+            story[-1].anchor = (f"s{idx}", sec["name"], found)
         story.append(Spacer(1, 6))
         key, run = [], []
         for k, q in enumerate(sec["questions"], first_no[idx] + 1):
@@ -1020,15 +1291,15 @@ def render_exam_pdf(ctx: dict, out_path: str) -> dict:
             story.append(TwoCol(run, col_w, GAP, body_h))
 
     def on_page(canv, d):
-        T.watermark(canv, th, PAGE_W, PAGE_H)
+        T.watermark(canv, th, page_w, page_h)
 
     def on_page_end(canv, d):
-        T.furniture(canv, th, canv.getPageNumber(), None, PAGE_W, PAGE_H, MARGIN)
+        T.furniture(canv, th, canv.getPageNumber(), None, page_w, page_h, MARGIN)
 
     # one full-width frame: 2 columns are made by ``TwoCol`` runs, so a wide question can span the page
     frames_first = frames_later = [Frame(MARGIN, MARGIN + 6, usable_w, body_h, 0, 0, 0, 0, id="c")]
 
-    d = BaseDocTemplate(out_path, pagesize=(PAGE_W, PAGE_H), leftMargin=MARGIN, rightMargin=MARGIN, topMargin=MARGIN,
+    d = BaseDocTemplate(out_path, pagesize=(page_w, page_h), leftMargin=MARGIN, rightMargin=MARGIN, topMargin=MARGIN,
             bottomMargin=MARGIN, title=ctx.get("title") or "", author=th.get("branding") or "", pageCompression=1)
     d.addPageTemplates([PageTemplate("first", frames_first, onPage=on_page, onPageEnd=on_page_end),
                         PageTemplate("later", frames_later, onPage=on_page, onPageEnd=on_page_end)])
@@ -1036,4 +1307,7 @@ def render_exam_pdf(ctx: dict, out_path: str) -> dict:
         d.build(story)
     finally:
         images.close()
-    return {"pages": d.page, "questions": n_q, "columns": cols, "wide": n_wide, "ms": int((time.perf_counter() - t0) * 1000)}
+    return {"pages": d.page, "questions": n_q, "columns": cols, "wide": n_wide, "ms": int((time.perf_counter() - t0) * 1000),
+            "layout": "slides" if slides else "oneliner" if oneliner else "paper", "anchors": found,
+            # slides: a question page's free area (top-left origin) — where /slides as in the sheet puts the box
+            "slide_body": [MARGIN, MARGIN + 32.0 + 12, MARGIN + usable_w, page_h - MARGIN - 6] if slides else None}

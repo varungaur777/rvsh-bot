@@ -19,7 +19,6 @@ import html
 import logging
 import re
 import time
-from pathlib import Path
 
 from bot.compute import run_cpu
 from bot.core.access import guard
@@ -27,7 +26,8 @@ from bot.core.delivery import deliver
 from bot.exam import marking as marking_mod
 from bot.exam import results as R
 from bot.exam.marks import fraction_text, scheme_text
-from bot.exam.urls import links_txt, shift_links
+from bot.exam import linkcheck
+from bot.exam.urls import links_by_lang
 from bot.render.results_pdf import render_results_pdf
 from bot.render.theme import app_theme
 from bot.tasks.lanes import TaskExists
@@ -118,23 +118,15 @@ def _scope_markup(uid: int, g: R.ExamGroup, page: int):
 
 
 async def _send_links(app, chat_id: int, uid: int, g: R.ExamGroup) -> None:
-    """🔗 One exam URL per shift (no repeats) as a .txt — admin only (URLs are candidate-specific, spec §25)."""
-    links = await shift_links(app.repo, g.slug)
-    if not links:
-        return await app.sender.send_message(chat_id, f"🔗 No saved links for <b>{html.escape(g.name)}</b> yet.")
-    folder = Path(app.root) / "tmp" / str(uid)
-    folder.mkdir(parents=True, exist_ok=True)
-    path = folder / (re.sub(r'[\\/:*?"<>|]+', " ", f"Links - {g.name} (all shifts)")[:140] + ".txt")
-    path.write_text(links_txt(links), encoding="utf-8")
-    dead = sum(1 for x in links if x.get("status") not in (None, "ok"))
-    caption = (f"🔗 <b>{html.escape(g.name)}</b>\n{len(links)} shift link{'s' if len(links) != 1 else ''} · one per shift, "
-               f"no repeats" + (f" · ⚠️ {dead} last seen not working" if dead else ""))
-    try:
-        await app.sender.send_document(chat_id, str(path), caption=caption)
-    except Exception:
-        path.unlink(missing_ok=True)
-        raise
-    app.dump.send_file(path, f"{caption}\n👤 <code>{uid}</code>", delete_after=True)  # the dump copy removes the file
+    """🔗 One exam URL per shift (no repeats), **a Hindi and an English .txt** (owner 2026-10-19) — admin only (URLs
+    are candidate-specific, spec §25). Links whose language is not known yet: ``/links`` → this exam → 🔍."""
+    per_lang = await links_by_lang(app.repo, [g.slug])
+    unknown = len(per_lang.get("unknown") or [])
+    note = (f"{unknown} saved link{'s' if unknown != 1 else ''} without a language yet — /links → this exam → 🔍"
+            if unknown else "")
+    if not await linkcheck.send_files(app, chat_id, uid, per_lang, g.name, note=note):
+        await app.sender.send_message(chat_id, f"🔗 No saved links with a known language for <b>{html.escape(g.name)}</b>"
+                                      + (f" — {unknown} to check: /links" if unknown else " yet") + ".")
 
 
 def _marking(sess) -> dict[str, tuple[float, float]]:

@@ -34,7 +34,10 @@ Public API
   - every page's images (``src``, lazy ``data-src``/``data-original``/``srcset``), stylesheets **and what the
     stylesheets reference** (``url(...)`` fonts/backgrounds, ``@import``) are fetched and packed with the HTML into
     an MHT (same layout Chrome produces). One asset cache per fetch; pages are packed in parallel.
-- ``await fetch_remote(api_url, token, url, timeout=120) -> list[Page]`` — the same, done by a remote fetch server.
+- ``await fetch_remote(api_url, token, url, timeout=120, assets=True) -> list[Page]`` — the same, done by a remote
+  fetch server.
+- ``assets=False`` (both): a light check — the page(s) only, no images / CSS / other-language postbacks (``/links``
+  reads exam, date, shift and the sheet's language from it).
 - ``Page`` — ``url``, ``kind``, ``mht`` (bytes), ``section`` (EDQT label or None), ``assets`` (count).
 - ``redact(url)`` — host + path only (the query identifies the candidate; never log it).
 - ``build_mht(page_url, html, assets) -> bytes``
@@ -149,10 +152,12 @@ AssetsFn = Callable[[int, int], None]  # (assets done, assets known so far)
 
 async def fetch_exam(url: str, *, proxy: str | None = None, timeout: float = 30, concurrency: int = 48,
                      progress: StatusFn | None = None, kind: str | None = None, engine: str = "auto",
-                     on_assets: AssetsFn | None = None, other_language: bool = True) -> list[Page]:
+                     on_assets: AssetsFn | None = None, other_language: bool = True, assets: bool = True) -> list[Page]:
     """``kind`` overrides URL detection (tests serve pages from 127.0.0.1). ``engine``: ``auto``/``chrome`` —
     everything as Chrome (``curl_cffi``; ``auto`` without it: the wget hybrid); ``wget`` — pages as Chrome, assets
-    by wget, wget's failures retried as Chrome; ``aiohttp`` — plain Python, everything in-process."""
+    by wget, wget's failures retried as Chrome; ``aiohttp`` — plain Python, everything in-process.
+    ``assets=False`` — a **light check** (``/links``: exam, date, shift and the sheet's language): only the page(s),
+    no images / CSS, no other-language postbacks; the MHT holds the HTML alone (enough for the parsers)."""
     url = normalize_url(url)
     kind = kind or detect_kind(url)
     if kind is None:
@@ -164,11 +169,11 @@ async def fetch_exam(url: str, *, proxy: str | None = None, timeout: float = 30,
         dl = _HttpDownloader(*args)
     else:  # wget, or auto without curl_cffi: the hybrid, which falls back by itself
         dl = _WgetDownloader(*args)
-    return await _fetch(url, kind, dl, progress, other_language)
+    return await _fetch(url, kind, dl, progress, other_language and assets, assets)
 
 
 async def _fetch(url: str, kind: str, dl: "_Downloader", progress: StatusFn | None,
-                 other_language: bool = True) -> list[Page]:
+                 other_language: bool = True, assets: bool = True) -> list[Page]:
     async with dl:
         if kind == "tcs":
             html, final, status = await dl.page(url)
@@ -176,7 +181,7 @@ async def _fetch(url: str, kind: str, dl: "_Downloader", progress: StatusFn | No
                 raise FetchError(f"http_{status}", status)
             if b"question-pnl" not in html:
                 raise FetchError("not_exam", status)
-            return [await _pack(dl, final, html, "tcs", None)]
+            return [await _pack(dl, final, html, "tcs", None, assets)]
         # 1) the link the user sent, alone (with retries): the URL check
         html, final, status = await dl.page(url)
         if status != 200:
@@ -216,7 +221,7 @@ async def _fetch(url: str, kind: str, dl: "_Downloader", progress: StatusFn | No
             gate = asyncio.Semaphore(PROBE_PARALLEL)
             done = await asyncio.gather(*(_other_language(dl, f, h, progress, gate) for f, h, _lb in pages))
             pages = [(f, h2, lb) for (f, _h, lb), h2 in zip(pages, done)]
-        return list(await asyncio.gather(*(_pack(dl, f, h, "edqt", lb) for f, h, lb in pages)))
+        return list(await asyncio.gather(*(_pack(dl, f, h, "edqt", lb, assets) for f, h, lb in pages)))
 
 
 def _edqt_label(html: bytes) -> str | None:
@@ -274,10 +279,14 @@ def _web_only(urls) -> list[str]:
     return list(dict.fromkeys(out))[:MAX_ASSETS]
 
 
-async def _pack(dl: "_Downloader", page_url: str, html: bytes, kind: str, section: str | None) -> Page:
+async def _pack(dl: "_Downloader", page_url: str, html: bytes, kind: str, section: str | None,
+                assets: bool = True) -> Page:
     charset = (re.search(rb'charset=["\']?([A-Za-z0-9_\-]+)', html[:4096]) or [None, b"utf-8"])[1].decode()
     text = html.decode(charset, "replace")
     text, urls = _asset_urls(page_url, text)
+    if not assets:  # light check: the page alone
+        return Page(url=page_url, kind=kind, mht=build_mht(page_url, text.encode(charset, "replace"), [], charset),
+                    section=section, engine=dl.name)
     got = dict(zip(urls, await dl.get_many(urls, page_url)))
     css = [(u, r[1]) for u, r in got.items() if r and (r[0] == "text/css" or urlsplit(u).path.lower().endswith(".css"))]
     missing = [u for u, r in got.items() if not r]  # only what the page itself uses counts as missing
@@ -764,12 +773,14 @@ def build_mht(page_url: str, html: bytes, assets: list[tuple[str, str, bytes]], 
 
 
 # ------------------------------------------------------------------ remote mode
-async def fetch_remote(api_url: str, token: str, url: str, *, timeout: float = 180) -> list[Page]:
-    """Ask a remote fetch server (``tools/fetch_server``) to fetch ``url`` and return the MHT pages."""
+async def fetch_remote(api_url: str, token: str, url: str, *, timeout: float = 180, assets: bool = True) -> list[Page]:
+    """Ask a remote fetch server (``tools/fetch_server``) to fetch ``url`` and return the MHT pages
+    (``assets=False``: the light check — an older server ignores it and sends the full pages)."""
     tmo = aiohttp.ClientTimeout(total=timeout)
+    body = {"url": url} if assets else {"url": url, "assets": False}
     try:
         async with aiohttp.ClientSession(timeout=tmo) as s:
-            async with s.post(api_url.rstrip("/") + "/fetch", json={"url": url}, headers={"X-Token": token}) as r:
+            async with s.post(api_url.rstrip("/") + "/fetch", json=body, headers={"X-Token": token}) as r:
                 body = await r.read()
     except (aiohttp.ClientError, asyncio.TimeoutError) as e:
         raise FetchError("remote", None, repr(e)) from e

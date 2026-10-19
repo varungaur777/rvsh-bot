@@ -13,7 +13,7 @@ from pyrogram import enums
 
 from bot.core.access import REPLAYING, guard
 from bot.core.sender import NO_PREVIEW
-from bot.handlers import adminpanel
+from bot.handlers import adminpanel, helpvideo
 from bot.ui.keyboards import home_keyboard, kb, nav_row, parse_cb
 from bot.ui.texts import t
 
@@ -70,7 +70,7 @@ async def nav(client, query) -> None:
     elif data.obj == "help":
         text, markup = help_text(app, uid), kb(nav_row(uid))
     elif data.obj == "exam":  # 📊 Exam Tools: no command needed — how to send a sheet (it said "coming soon")
-        text, markup = t("exam_how_to"), kb(nav_row(uid))
+        text, markup = t("exam_how_to"), kb(*helpvideo.rows(app, uid), nav_row(uid))
     elif data.obj == "admin" and app.access.is_admin(uid):
         text, markup = adminpanel.hub(app, uid)
     elif data.obj == "quiz":

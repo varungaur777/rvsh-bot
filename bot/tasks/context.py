@@ -14,6 +14,9 @@ Public API
 - ``task.spawn(coro)`` — child job cancelled with the task. ``task.keep(coro)`` — job that must finish (input
   dump uploads): not cancelled; the workdir is deleted after it ends (≤ ``KEEP_TIMEOUT_S``), while the task
   itself closes at once. ``task.check()`` raises ``TaskCancelled``.
+- A task that ends any other way than ``completed`` (cancel, error, timeout …) has its workdir deleted **again**
+  ``SWEEP_S`` later (B-044): a pool job already running when it was cancelled is not stopped (a process / thread
+  can't be) and writes its file (the exam bank, a PDF) after the first delete.
 - Status values: queued · running · completed · cancelled · error · blocked · timeout · restart.
 """
 
@@ -28,20 +31,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+from bot.core.bg import spawn
 from bot.core.errors import TaskCancelled, UserBlockedBot
 
 log = logging.getLogger(__name__)
 
 _ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789"
 KEEP_TIMEOUT_S = 300
-_DETACHED: set[asyncio.Task] = set()  # strong refs for cleanup jobs that outlive their task
-
-
-def _detached(coro) -> asyncio.Task:
-    job = asyncio.get_running_loop().create_task(coro)
-    _DETACHED.add(job)
-    job.add_done_callback(_DETACHED.discard)
-    return job
+SWEEP_S = (15, 60, 330)  # seconds after close: the last one past the longest heavy pool job (5 × 60 s)
+_detached = spawn  # cleanup jobs that outlive their task (strong refs, errors logged)
 
 
 def new_task_id() -> str:
@@ -67,6 +65,7 @@ class TaskContext:
     error_id: str | None = None
     outputs: list[dict] = field(default_factory=list)
     data: dict[str, Any] = field(default_factory=dict)
+    solo: bool = True  # the user's one task (/cancel, "one task at a time"); False: a long admin job beside it (/batch)
     cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
     _children: set = field(default_factory=set)
     _keep: set = field(default_factory=set)
@@ -113,10 +112,13 @@ class TaskContext:
             child.cancel()
         if self._children:
             await asyncio.gather(*self._children, return_exceptions=True)
+        sweep = status != "completed"  # a cancelled pool job may still write into the workdir (B-044)
         if self._keep:  # dump uploads still running: the workdir goes when they finish (user is not kept waiting)
-            _detached(self._drain_then_remove(set(self._keep)))
+            _detached(self._drain_then_remove(set(self._keep), sweep))
         else:
             await asyncio.to_thread(shutil.rmtree, self.workdir, ignore_errors=True)
+            if sweep:
+                _detached(self._sweep())
         for hook in self._on_close:
             try:
                 res = hook(self)
@@ -141,11 +143,23 @@ class TaskContext:
         job.add_done_callback(self._keep.discard)
         return job
 
-    async def _drain_then_remove(self, jobs: set) -> None:
+    async def _drain_then_remove(self, jobs: set, sweep: bool = False) -> None:
         _done, pending = await asyncio.wait(jobs, timeout=KEEP_TIMEOUT_S)
         for job in pending:
             job.cancel()
         await asyncio.to_thread(shutil.rmtree, self.workdir, ignore_errors=True)
+        if sweep:
+            await self._sweep()
+
+    async def _sweep(self) -> None:
+        """The workdir deleted again ``SWEEP_S`` after close — files a cancelled pool job wrote later (B-044)."""
+        waited = 0.0
+        for at in SWEEP_S:
+            await asyncio.sleep(at - waited)
+            waited = at
+            if self.workdir.exists():
+                log.info("task %s: files written after it ended — removed", self.task_id)
+                await asyncio.to_thread(shutil.rmtree, self.workdir, ignore_errors=True)
 
     def check(self) -> None:
         """Raise ``TaskCancelled`` if the task was cancelled (call between steps of long loops)."""

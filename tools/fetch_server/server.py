@@ -21,9 +21,12 @@ Env vars: ``FETCH_TOKEN`` (else ``fetch_token.txt``) · ``PORT`` (8787) · ``HOS
 
 API
 ---
-- ``POST /fetch`` ``{"url": "..."}`` with header ``X-Token`` → ``200 {"pages": [{url, kind, section, assets,
+- ``POST /fetch`` ``{"url": "...", "assets": true}`` (``false``: the page(s) only) with header ``X-Token`` → ``200 {"pages": [{url, kind, section, assets,
   missing, mht_b64}]}`` or ``4xx/5xx {"error", "status", "detail"}``
 - ``GET /health`` → ``{"ok": true, "busy": n}``
+
+run it: [cloudflared tunnel --url http://localhost:8787]
+
 """
 
 from __future__ import annotations
@@ -65,6 +68,7 @@ def make_app(token: str, max_concurrent: int = 2, proxy: str | None = None) -> w
         try:
             body = await request.json()
             url = str(body["url"])
+            assets = body.get("assets", True) is not False  # False: the bot's light check (/links)
         except (ValueError, KeyError, TypeError):
             return web.json_response({"error": "bad_request"}, status=400)
         if fetcher.detect_kind(url) is None:
@@ -72,7 +76,8 @@ def make_app(token: str, max_concurrent: int = 2, proxy: str | None = None) -> w
         async with sem:
             state["busy"] += 1
             try:
-                pages = await fetcher.fetch_exam(url, proxy=proxy, engine=os.environ.get("FETCH_ENGINE", "auto"))
+                pages = await fetcher.fetch_exam(url, proxy=proxy, engine=os.environ.get("FETCH_ENGINE", "auto"),
+                                                 assets=assets)
             except fetcher.FetchError as e:
                 log.info("fetch failed %s: %s", fetcher.redact(url), e)
                 return web.json_response({"error": e.reason, "status": e.status, "detail": e.detail[:200]}, status=502)

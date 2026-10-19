@@ -144,7 +144,7 @@ async def board_screen(app, uid: int, quiz: dict):
     stats = await app.repo.quiz_stats.get(quiz["_id"], copy=False)
     n = store.position(stats, 0)[1]
     text = (f"🏆 <b>Leaderboard</b> · {html.escape(quiz.get('title') or 'Quiz')}\n<i>{n} ranked player{'s' if n != 1 else ''} · "
-            f"first private / Web App attempt of each player</i>\n\n" + store.board_text(stats, uid, n=20))
+            f"first attempt of each player (private, Web App or a whole group quiz)</i>\n\n" + store.board_text(stats, uid, n=20))
     return text, kb([btn("⬅️ Quiz", cb("qz", uid, quiz["_id"], "open")), nav_row(uid)[-1]])
 
 
@@ -382,7 +382,7 @@ async def group_button(client, query) -> None:
         return await app.sender.answer(query.id, "This quiz was deleted.", show_alert=True)
     if d.arg == "x":
         await app.sender.answer(query.id)
-        return await app.sender.delete(chat.id, query.message.id)
+        return await app.sender.remove(chat.id, query.message.id, "✖️ Cancelled.")
     if d.arg == "card":  # a number on the group's quiz list → this quiz's start card, here (as /quiz qz_…)
         why = await _group_ok(app, chat, uid) or ("⏳ A quiz is already running here — wait for it to end."
                                                  if app.quiz.session_for(chat.id) is not None else "")
@@ -407,10 +407,7 @@ async def group_button(client, query) -> None:
         if why:
             return await app.sender.answer(query.id, _plain(why), show_alert=True)
         await app.sender.answer(query.id)
-        try:
-            await app.sender.delete(chat.id, query.message.id)
-        except Exception:
-            pass
+        await app.sender.remove(chat.id, query.message.id, f"▶️ <b>{html.escape(quiz.get('title') or 'Quiz')}</b> — starting…")
         g = await app.repo.groups.get(chat.id, copy=False) or {}
         starter = None if uid == ANON_ADMIN_BOT else query.from_user
         try:

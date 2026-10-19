@@ -261,7 +261,10 @@ async def on_button(client, query) -> None:
                                              + (f"<i>{html.escape(f.hint)}</i>\n" if f.hint else "")
                                              + ("Send the new text, or <code>-</code> to clear it." if f.kind == "text"
                                                 else "Send a colour like <code>#1a237e</code>, or <code>-</code> for the "
-                                                "default." if f.kind == "color" else "Send the new value.")
+                                                "default." if f.kind == "color"
+                                                else "Send the <b>video</b> (kept in the dump channel), or a post link "
+                                                "like <code>https://t.me/channel/123</code>, or <code>-</code> to remove "
+                                                "it." if f.kind == "video" else "Send the new value.")
                                              + "\n/cancel to stop.")
     await app.sender.answer(query.id, note)
     text, markup = _card(app, uid, panel, page)
@@ -272,8 +275,13 @@ async def _take_value(app, message, sess) -> None:
     panel, page, i = sess.data["set_edit"]
     f = _field(panel, page, i)
     uid = message.from_user.id
+    raw = message.text or ""
+    if f.kind == "video":
+        raw = await _video_value(app, message)
+        if raw is None:
+            return
     try:
-        value = await app.settings.set(f.key, sp.parse(f, message.text or ""), by=uid)
+        value = await app.settings.set(f.key, sp.parse(f, raw), by=uid)
     except SettingError as e:
         return await app.sender.send_message(message.chat.id, f"⚠️ {html.escape(str(e))} — try again, or /cancel.")
     card_id = sess.ui_message_id
@@ -285,6 +293,36 @@ async def _take_value(app, message, sess) -> None:
         await _send_fsub_check(app, message.chat.id)
     if card_id:
         await app.sender.edit_text(message.chat.id, card_id, text, reply_markup=markup)
+
+
+async def _video_value(app, message) -> str | None:
+    """/bot → 🎬 Help video: a sent video is copied to the dump channel and its link is the value; a typed link is
+    tried once (sent to the owner) so a post the bot cannot read is refused now, not when a user needs it.
+    ``None`` = refused (the question stays open)."""
+    from bot.core.tgref import from_message, private_link
+    from bot.handlers.helpvideo import parse_post
+    chat_id = message.chat.id
+    if from_message(message) is not None:
+        dump = app.config.dump_channel_id
+        try:
+            copied = await app.sender.copy(dump, chat_id, message.id)
+        except Exception as e:
+            await app.sender.send_message(chat_id, f"⚠️ I couldn't keep it in the dump channel ({e.__class__.__name__})"
+                                          " — try again, or /cancel.")
+            return None
+        return private_link(dump, copied.id)
+    text = (message.text or "").strip()
+    post = parse_post(text)
+    if text in ("", "-") or post is None:
+        return text  # cleared, or refused with the reason by ``sp.parse``
+    try:
+        await app.sender.copy(chat_id, post[0], post[1])
+    except Exception as e:
+        await app.sender.send_message(chat_id, f"⚠️ I can't open that post ({e.__class__.__name__}) — the bot must be "
+                                      "able to read it (a public channel, or one the bot is in). Send the video "
+                                      "itself, or /cancel.")
+        return None
+    return text
 
 
 async def _send_fsub_check(app, chat_id: int) -> None:

@@ -144,6 +144,33 @@ class MongoStore:
     async def count(self, coll: str, flt: dict | None = None) -> int:
         return await self._run(self._coll(coll).count_documents(flt or {}))
 
+    async def sizes(self, colls: list[str]) -> dict:
+        """Mongo's own size numbers in bytes (``/db``, owner 2026-10-19: "db command mai db ka size bhi dikhe"):
+        ``{"data", "storage", "indexes", "colls": {name: {"data", "storage", "indexes"}}}`` — ``dbStats`` + one
+        ``$collStats`` per collection (a collection it cannot read, or that does not exist yet, is left out).
+        ``data`` = documents uncompressed, ``storage`` = on disk (compressed). Read only."""
+        import asyncio
+
+        db = self.db
+        if db is None:
+            raise MongoUnavailable("not connected")
+        st = await self._run(db.command("dbStats"))
+        out = {"data": int(st.get("dataSize") or 0), "storage": int(st.get("storageSize") or 0),
+               "indexes": int(st.get("indexSize") or 0), "colls": {}}
+
+        async def one(name: str) -> None:
+            try:
+                cur = await db[name].aggregate([{"$collStats": {"storageStats": {}}}])
+                rows = await cur.to_list()
+            except PyMongoError:
+                return
+            s = (rows[0].get("storageStats") or {}) if rows else {}
+            if s:
+                out["colls"][name] = {"data": int(s.get("size") or 0), "storage": int(s.get("storageSize") or 0),
+                                      "indexes": int(s.get("totalIndexSize") or 0)}
+        await asyncio.gather(*(one(c) for c in colls))
+        return out
+
     async def ensure_indexes(self) -> None:
         for coll, specs in INDEXES.items():
             for keys in specs:

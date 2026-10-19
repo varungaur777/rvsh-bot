@@ -1,10 +1,12 @@
 """Quizzes and their stats (spec §9.1, §9.4) — one ``quizzes`` doc (questions only, rarely rewritten) and one
 ``quiz_stats`` doc per quiz holding every player.
 
-Ranking (like the official @QuizBot): a user's **first** private or Web App attempt is their ranked result, frozen;
-later attempts are practice (counted: ``attempts``, ``last_score``, ``best_practice_score``). Group play is never
-ranked globally — it adds ``plays``, ``groups_played`` and each player's ``group`` counter. Sort: score ↓, time ↑,
-earlier ``at`` first. ``top100`` is cached in the doc.
+Ranking (like the official @QuizBot): a user's **first** attempt — private, Web App or a group quiz played to the
+end — is their ranked result, frozen; later attempts are practice (counted: ``attempts``, ``last_score``,
+``best_practice_score``). Group play (owner 2026-10-19: "quiz mai group score bhi global ranking mai dalo"; chose:
+the first attempt anywhere, only a group quiz that ran to its last question) also adds ``plays``, ``groups_played``
+and each player's ``group`` counter; a group quiz stopped early ranks nobody (``ranks=False``). Sort: score ↓,
+time ↑, earlier ``at`` first. ``top100`` is cached in the doc.
 
 Writes happen once per finished session (never per answer), under a per-quiz ``asyncio.Lock`` (one process owns the
 data — instance lease), as **one** ``update`` with ``$inc`` / ``$set`` / ``$max`` — ``top100`` included: a ranked
@@ -15,9 +17,9 @@ player). A player's rank is one pass over the players (``position``). Load test 
 Public API
 ----------
 - ``new_id() -> "qz_xxxxxx"`` · ``await get(app, quiz_id)`` (read-only, cached) · ``await find_by_fp(app, fp)``
-- ``await record(app, quiz_id, results, mode, group=None) -> {uid: {"ranked": bool, "rank": int | None, "of": int}}``
-  — ``results`` [{uid, name, correct, wrong, skipped, time_s}]; ``mode``: private | webapp | group | practice
-  (practice: counted, never ranked).
+- ``await record(app, quiz_id, results, mode, group=None, ranks=True) -> {uid: {"ranked": bool, "rank": int | None,
+  "of": int}}`` — ``results`` [{uid, name, correct, wrong, skipped, time_s}]; ``mode``: private | webapp | group |
+  practice (practice: counted, never ranked); ``ranks=False`` = counted, never ranked (a group quiz stopped early).
 - ``ranking(stats) -> list[(uid, entry)]`` · ``rank_of(stats, uid) -> (rank, total) | None`` · ``board_text(stats, viewer)``
 - ``await delete(app, quiz_id)``.
 
@@ -103,7 +105,8 @@ def rank_of(stats: dict | None, uid: int | str) -> tuple[int, int] | None:
     return (rank, total) if rank else None
 
 
-async def record(app, quiz_id: str, results: list[dict], mode: str, group: dict | None = None) -> dict:
+async def record(app, quiz_id: str, results: list[dict], mode: str, group: dict | None = None,
+                 ranks: bool = True) -> dict:
     """One finished session → ``quiz_stats`` (see module doc). Returns each player's ranked flag and rank."""
     lock = _locks.setdefault(quiz_id, asyncio.Lock())
     async with lock:
@@ -123,7 +126,7 @@ async def record(app, quiz_id: str, results: list[dict], mode: str, group: dict 
             upd["$inc"][f"{p}.attempts"] = 1
             counter = {"private": "private", "practice": "private", "webapp": "webapp", "group": "group"}[mode]
             upd["$inc"][f"{p}.{counter}"] = 1
-            if mode in ("private", "webapp") and not (players.get(uid) or {}).get("ranked"):
+            if ranks and mode in ("private", "webapp", "group") and not (players.get(uid) or {}).get("ranked"):
                 upd["$set"][f"{p}.ranked"] = {"score": score, "correct": int(r.get("correct", 0)),
                                               "wrong": int(r.get("wrong", 0)), "skipped": int(r.get("skipped", 0)),
                                               "time_s": round(float(r.get("time_s", 0)), 1), "at": now}
@@ -144,11 +147,13 @@ async def record(app, quiz_id: str, results: list[dict], mode: str, group: dict 
         new = await app.repo.quiz_stats.update(quiz_id, upd, copy=False)
         await app.repo.quizzes.update(quiz_id, {"$inc": {"plays": 1}}, upsert=False, copy=False)
         for r in results:
-            if mode != "group":
+            if mode != "group" or str(r["uid"]) in ranked_now:  # 👤 My Stats lists the quizzes with a result
                 await app.repo.users.update(r["uid"], {"$addToSet": {"quiz_db.attempted": quiz_id}}, upsert=False)
     out = {}
-    if mode == "group":  # never ranked: nobody reads a rank here
-        return {r["uid"]: {"ranked": False, "rank": None, "of": None} for r in results}
+    if mode == "group":  # only the players ranked by this game get their rank (the group board shows it)
+        return {r["uid"]: ({"ranked": True, **dict(zip(("rank", "of"), position(new, r["uid"])))}
+                           if str(r["uid"]) in ranked_now else {"ranked": False, "rank": None, "of": None})
+                for r in results}
     for r in results:
         rank, total = position(new, r["uid"])
         out[r["uid"]] = {"ranked": str(r["uid"]) in ranked_now, "rank": rank, "of": total}
@@ -162,7 +167,7 @@ def board_text(stats: dict | None, viewer: int | None = None, n: int = 10) -> st
     else:
         rows = ranking(stats)
     if not rows:
-        return "<i>No ranked players yet — the first private or Web App attempt of each player counts.</i>"
+        return "<i>No ranked players yet — the first attempt of each player counts (private, Web App or a whole group quiz).</i>"
     medals = {1: "🥇", 2: "🥈", 3: "🥉"}
     lines = []
     for i, (uid, p) in enumerate(rows[:n], 1):

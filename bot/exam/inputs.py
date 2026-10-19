@@ -49,10 +49,11 @@ import time
 from pathlib import Path
 
 from bot.compute import run_cpu
+from bot.core.bg import spawn
 from bot.core.errors import SourceUnavailable
 from bot.core.tgref import private_link
 from bot.exam.jobs import exam_file_names
-from bot.exam.urls import hints_from_text
+from bot.exam.urls import add_mht_page, hints_from_text
 from bot.net import service
 from bot.tasks.lanes import TaskExists
 from bot.ui.progress import human_bytes
@@ -60,14 +61,7 @@ from bot.ui.progress import human_bytes
 log = logging.getLogger(__name__)
 
 
-_BG: set[asyncio.Task] = set()  # strong refs for fire-and-forget dump posts (asyncio keeps only weak ones)
-
-
-def _background(coro) -> asyncio.Task:
-    job = asyncio.get_running_loop().create_task(coro)
-    _BG.add(job)
-    job.add_done_callback(_BG.discard)
-    return job
+_background = spawn  # fire-and-forget dump posts (strong refs, errors logged)
 
 
 def _safe(name: str) -> str:
@@ -326,8 +320,8 @@ async def add_urls(app, task, urls: list[str], progress, on_assets=None, gate=No
                      missing_assets=sum(len(pg.missing) for pg in pages))
         paths = [Path(p) for p in item["paths"]]
         names = await run_cpu(app, "parse", task.task_id, exam_file_names, paths, task.data.get("hints"))
-        for p, name in zip(paths, names):
-            task.keep(_to_dump(app, task, item, p, False, name))
+        for k, (p, name) in enumerate(zip(paths, names)):
+            task.keep(_to_dump(app, task, item, p, False, name, (k, len(paths), len(pages[k].missing))))
     return items
 
 
@@ -358,20 +352,23 @@ def _caption(task, item: dict, path: Path, name: str | None = None) -> str:
     return "\n".join(lines)
 
 
-async def _post(app, task, item: dict, owner: bool, send) -> None:
-    """One dump post through the uploader pool (``send(reply_to) -> (bot, msg)``); the anchor resolves the future."""
+async def _post(app, task, item: dict, owner: bool, send) -> dict | None:
+    """One dump post through the uploader pool (``send(reply_to) -> (bot, msg)``); the anchor resolves the future.
+    Returns the dump entry (``None`` when the post failed)."""
     fut = task.data["anchor_fut"]
     reply_to = None if owner else await anchor_id(task)
     try:
         bot, msg = await send(reply_to)
         doc = getattr(msg, "document", None)
-        item.setdefault("dump", []).append({"chat_id": msg.chat.id, "message_id": msg.id, "bot": bot,
-                                            "link": private_link(msg.chat.id, msg.id),
-                                            "file_unique_id": getattr(doc, "file_unique_id", None) if doc else None})
+        entry = {"chat_id": msg.chat.id, "message_id": msg.id, "bot": bot, "link": private_link(msg.chat.id, msg.id),
+                 "file_unique_id": getattr(doc, "file_unique_id", None) if doc else None,
+                 "size": getattr(doc, "file_size", None) if doc else None}
+        item.setdefault("dump", []).append(entry)
         if owner:
             task.data["anchor_id"] = msg.id
             if not fut.done():
                 fut.set_result(msg.id)
+        return entry
     except asyncio.CancelledError:
         if owner and not fut.done():
             fut.set_result(None)
@@ -380,16 +377,26 @@ async def _post(app, task, item: dict, owner: bool, send) -> None:
         app.dump.report_error(e, "inputs.dump_post")
         if owner and not fut.done():
             fut.set_result(None)
+        return None
 
 
-async def _to_dump(app, task, item: dict, path: Path, owner: bool, name: str | None = None) -> None:
+async def _to_dump(app, task, item: dict, path: Path, owner: bool, name: str | None = None,
+                   page: tuple[int, int, int] | None = None) -> None:
     """Upload one stored input file to dump, **named after the exam** (``exam_file_names``; the file on disk keeps
-    its name — Telegram gets ``file_name=``). ``name`` given → used as is (all pages of a link named together)."""
+    its name — Telegram gets ``file_name=``). ``name`` given → used as is (all pages of a link named together).
+    ``page`` = (index, pages, files missing) of a link's fetched page: its dump copy is remembered for that link
+    (``urls.add_mht_page`` — a better copy replaces a worse one)."""
     if name is None:
         name = (await run_cpu(app, "parse", task.task_id, exam_file_names, [path], task.data.get("hints")))[0]
-    await _post(app, task, item, owner, lambda reply_to: app.uploads.send_document(
+    entry = await _post(app, task, item, owner, lambda reply_to: app.uploads.send_document(
         app.config.dump_channel_id, str(path), _caption(task, item, path, name), reply_to=reply_to,
         file_name=name or path.name))
+    if entry and page is not None and item.get("url"):
+        try:
+            await add_mht_page(app.repo, item["url"], {**entry, "name": name or path.name}, page[0], page[1], task.user_id,
+                               missing=page[2])
+        except Exception as e:  # the archive never costs the user the task
+            log.warning("mht archive of %s failed: %r", item["url"][:60], e)
 
 
 def _link_to_dump(app, task, item: dict, owner: bool):

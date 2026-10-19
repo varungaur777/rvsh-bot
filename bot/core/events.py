@@ -121,7 +121,7 @@ async def _bot_status_in_group(app, chat, status, new, found: bool = False) -> N
     link = f"https://t.me/{chat.username}" if chat.username else prev.get("link", "")
     await app.repo.groups.update(chat.id, {
         "$set": {"title": chat.title or "", "username": chat.username or "", "link": link, "present": present,
-                 "bot_is_admin": is_admin, "rights": rights},
+                 "bot_is_admin": is_admin, "rights": rights, "can_write": True},  # a refused send sets it false again
         "$setOnInsert": {"authorised": False, "banned": False, "auto_quiz": True, "lang_pref": "both",
                          "added_at": _now()},
     })

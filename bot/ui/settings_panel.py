@@ -7,7 +7,8 @@ Public API
 - ``PANELS`` — ``{"es" | "ps" | "wm" | "bot": {"title", "role", "pages": [(name, [Field, …]), …]}}``.
 - ``Field(key, label, kind, choices=None, names=None, hint="")`` — kind: ``bool`` (On/Off) · ``choice`` (a row of
   values) · ``color`` (🎨 → a grid of named colours + ✏️ any #hex; owner 2026-10-13 "colour grid bhi dalo") ·
-  ``number`` / ``text`` / ``list`` (✏️ → type a value).
+  ``number`` / ``text`` / ``list`` (✏️ → type a value) · ``video`` (🎬 → send a video, kept in the dump channel, or a
+  t.me post link; the setting is the post's link).
 - ``render(app, uid, panel, page) -> (text, markup)``; ``render_colors(app, uid, panel, page, i)`` — the colour grid
   of one ``color`` field; ``show(value, field)`` — a value as the admin reads it.
 - ``parse(field, default, text)`` — a typed value → what ``settings.set`` takes (``SettingError`` on nonsense).
@@ -34,7 +35,7 @@ from bot.ui.texts import t
 class Field:
     key: str
     label: str
-    kind: str  # bool | choice | number | text | list
+    kind: str  # bool | choice | color | number | text | list | video
     choices: tuple = ()
     names: tuple = ()  # display names for ``choices``
     hint: str = ""
@@ -143,8 +144,11 @@ PANELS: dict[str, dict] = {
         ("General", [
             F("public_enabled", "Open to everyone", "bool", hint="Off = admins only (same as /on, /off)"),
             F("channel_link", "Channel link on /start", "text"),
-            F("admin_contact", "Admin contact on /start", "text"),
+            F("admin_contact", "Admin contact (/start, 👤 Contact admin)", "text",
+              hint="@username or a link — also the 👤 Contact admin button when a sheet link does not open"),
             F("force_sub.channels", "Must-join channels", "list", hint="IDs (-100…) or @usernames, comma-separated; empty = none"),
+            F("help_video", "Help video: save a page as .mhtml", "video",
+              hint="Sent by the 🎬 button when a sheet link does not open (site refused / no answer)"),
         ]),
         ("Speed", [
             F("pool.workers", "Worker processes", "number", hint="A number, or auto"),
@@ -186,6 +190,8 @@ def show(value, field: Field) -> str:
         return dict(zip(field.choices, field.names)).get(value, value or "default")
     if field.kind == "list":
         return ", ".join(f"{x:g}" if isinstance(x, float) else str(x) for x in value) if value else "none"
+    if field.kind == "video":
+        return "set" if value else "not set"
     if value in ("", None):
         return "—"
     return f"{value:g}" if isinstance(value, float) else str(value)
@@ -197,6 +203,13 @@ def parse(field: Field, text: str):
     text = (text or "").strip()
     if field.kind in ("text", "color"):  # a colour is checked by settings.set
         return "" if text in ("", "-") else text
+    if field.kind == "video":  # a sent video becomes a dump link before this (handlers.settings)
+        from bot.handlers.helpvideo import parse_post
+        if text in ("", "-"):
+            return ""
+        if parse_post(text) is None:
+            raise SettingError("send the video itself, or a post link like https://t.me/channel/123")
+        return text
     if field.kind == "list":
         parts = [p.strip() for p in text.replace(";", ",").split(",") if p.strip() and p.strip() != "-"]
         sample = default[0] if default else None
@@ -251,6 +264,8 @@ def render(app, uid: int, panel: str, page: int = 0):
             rows.append([pick(n, f"c_{page}_{i}_{j}", v == c) for j, (c, n) in enumerate(zip(f.choices, f.names))])
         elif f.kind == "color":
             rows.append([btn(f"🎨 {f.label}: {show(v, f)}"[:60], cb("set", uid, panel, f"k_{page}_{i}"))])
+        elif f.kind == "video":
+            rows.append([btn(f"🎬 {f.label}: {show(v, f)}"[:60], cb("set", uid, panel, f"e_{page}_{i}"))])
         else:
             rows.append([btn(f"✏️ {f.label}: {show(v, f)}"[:60], cb("set", uid, panel, f"e_{page}_{i}"))])
     return text, kb(*rows, [btn(t("btn_home"), cb("nav", uid, "home"))])

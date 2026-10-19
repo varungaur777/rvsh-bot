@@ -11,8 +11,8 @@ from pyrogram.handlers import (CallbackQueryHandler, ChatMemberUpdatedHandler, I
                                 RawUpdateHandler)
 
 from bot.core import events
-from bot.handlers import (admin, basic, broadcast, dbpanel, exam, files, jsoncmd, loadquiz, people, quiz, results, settings,
-                          taskview, update, waits)
+from bot.handlers import (admin, basic, batch, broadcast, dbpanel, exam, files, helpvideo, jsoncmd, links, loadquiz, people,
+                          quiz, results, settings, slides, taskview, update, waits)
 
 
 def _cb(prefix: str):
@@ -75,6 +75,9 @@ def register(app) -> None:
     add(MessageHandler(waits.intercept, filters.private & waits.waiting_filter()), group=-1)  # /bc, /msg, ID asks
     add(MessageHandler(exam.exam_command, filters.command(["tcs", "edqt"])))
     add(MessageHandler(results.results_command, filters.command("results") & filters.private))
+    add(MessageHandler(links.links_command, filters.command("links") & filters.private))
+    add(MessageHandler(batch.batch_command, filters.command("batch") & filters.private))
+    add(MessageHandler(slides.slides_command, filters.command("slides") & filters.private))
     add(MessageHandler(jsoncmd.json_command, filters.command("json")))
     add(MessageHandler(jsoncmd.json_batch_command, filters.command("json_batch")))
     add(MessageHandler(loadquiz.load_quiz_command, filters.command("load_quiz")))
@@ -84,10 +87,13 @@ def register(app) -> None:
     add(CallbackQueryHandler(basic.nav, _cb("nav")))
     add(CallbackQueryHandler(exam.on_button, _cb("exm")))
     add(CallbackQueryHandler(results.on_button, _cb("res")))
+    add(CallbackQueryHandler(links.on_button, _cb("lnk")))
+    add(CallbackQueryHandler(batch.on_button, _cb("bat")))
     add(CallbackQueryHandler(jsoncmd.on_button, _cb("jsn")))
     add(CallbackQueryHandler(jsoncmd.on_batch_button, _cb("jsb")))
     add(CallbackQueryHandler(update.on_button, _cb("upd")))
     add(CallbackQueryHandler(basic.fsub_recheck, _cb("fsub")))
+    add(CallbackQueryHandler(helpvideo.on_button, _cb("hlp")))
     add(CallbackQueryHandler(admin.stats_button, _cb("sts")))
     add(CallbackQueryHandler(broadcast.on_button, _cb("bc")))
     add(CallbackQueryHandler(taskview.on_button, _cb("tsk")))

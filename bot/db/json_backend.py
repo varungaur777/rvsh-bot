@@ -6,7 +6,7 @@ Layout (``<root>`` = ``DOWNLOAD_ROOT/_db``)
 --------------------------------------------
 ``users/<id % 100>/<id>.json`` · ``exam_results/<exam_key slug>/<roll>.json`` (one folder per exam, so the
 result PDF reads one folder) · ``exam_urls/<exam_name_slug>/<hash>.json`` (id ``slug|hash``; one folder per exam)
-· ``ocr_cache/<hash[:2]>/<hash>.json`` · everything else
+· ``ocr_cache/<hash[:2]>/<hash>.json`` (``exam_mht`` too) · everything else
 ``<collection>/<id>.json``. Ids that are not filename-safe are slugged with a short hash suffix; the real
 ``_id`` is always inside the file.
 
@@ -66,7 +66,7 @@ class JsonStore:
         if coll == "exam_urls" and "|" in sid:
             exam, h = sid.rsplit("|", 1)
             return self.root / coll / slug(exam) / f"{slug(h)}.json"
-        if coll in ("ocr_cache", "exam_urls"):
+        if coll in ("ocr_cache", "exam_urls", "exam_mht"):
             s = slug(sid)
             return self.root / coll / s[:2] / f"{s}.json"
         return self.root / coll / f"{slug(sid)}.json"
