@@ -4,7 +4,8 @@ Depends on: ``net.fetcher``, ``core.settings``, ``core.config``. Used by: exam i
 
 Public API
 ----------
-- ``await fetch_url(app, url, progress=None, on_assets=None) -> list[Page]`` (engine: setting ``fetch.engine``)
+- ``await fetch_url(app, url, progress=None, on_assets=None, light=False) -> list[Page]`` (engine: setting
+  ``fetch.engine``; ``light``: the page(s) only, for ``/links``)
   - ``fetch.mode = direct``: fetch from this machine (proxy: setting ``http.proxy`` or env ``HTTP_PROXY``).
   - ``remote``: ask the fetch server (``FETCH_API_URL`` + ``FETCH_API_TOKEN``).
   - ``auto``: direct first; on a refusal (non-200, network error, non-exam page) use the server if configured.
@@ -30,7 +31,8 @@ from bot.net import fetcher
 log = logging.getLogger(__name__)
 
 
-async def fetch_url(app, url: str, progress=None, on_assets=None) -> list[fetcher.Page]:
+async def fetch_url(app, url: str, progress=None, on_assets=None, *, light: bool = False) -> list[fetcher.Page]:
+    """``light``: the page(s) only — no images / CSS / other-language postbacks (``/links`` language check)."""
     mode = app.settings.get("fetch.mode") or "direct"
     api, token = app.config.fetch_api_url, app.config.fetch_api_token
     proxy = app.settings.get("http.proxy") or app.config.http_proxy or None
@@ -38,10 +40,11 @@ async def fetch_url(app, url: str, progress=None, on_assets=None) -> list[fetche
         mode = "direct"
     try:
         if mode == "remote":
-            return await fetcher.fetch_remote(api, token, url)
+            return await fetcher.fetch_remote(api, token, url, assets=not light)
         try:
             return await fetcher.fetch_exam(url, proxy=proxy, progress=progress, on_assets=on_assets,
                                             other_language=bool(app.settings.get("fetch.other_language", True)),
+                                            assets=not light,
                                             engine=app.settings.get("fetch.engine") or "auto",
                                             concurrency=int(app.settings.get("fetch.concurrency") or 48))
         except fetcher.FetchError as e:
@@ -49,7 +52,7 @@ async def fetch_url(app, url: str, progress=None, on_assets=None) -> list[fetche
                 log.info("direct fetch refused (%s) — trying the remote fetch server", e.reason)
                 if progress:
                     progress("trying the backup server")
-                return await fetcher.fetch_remote(api, token, url)
+                return await fetcher.fetch_remote(api, token, url, assets=not light)
             raise
     except fetcher.FetchError as e:
         log.info("fetch failed (%s, status %s) for %s: %s", e.reason, e.status, fetcher.redact(url), e.detail[:200])
