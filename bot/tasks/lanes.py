@@ -31,6 +31,7 @@ import logging
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+from bot.core.bg import spawn
 from bot.core.errors import BotError
 from bot.tasks.context import TaskContext, new_task_id
 
@@ -76,15 +77,17 @@ class TaskManager:
 
     # ------------------------------------------------------------ create / submit
     def create(self, user_id: int, kind: str, lane: str, priority: int, *, title: str = "",
-               chat_id: int | None = None) -> TaskContext:
-        """New ``TaskContext`` with its workdir under ``<root>/tasks/<user>/<task>/`` (not yet queued)."""
+               chat_id: int | None = None, solo: bool = True) -> TaskContext:
+        """New ``TaskContext`` with its workdir under ``<root>/tasks/<user>/<task>/`` (not yet queued). ``solo=False``:
+        not the user's one task — runs beside it (``/batch``: hours of work must not lock the admin out); stopped by
+        its own button or ``/task``, not ``/cancel``."""
         if lane not in self.lanes:
             raise ValueError(f"unknown lane {lane}")
-        if user_id in self._by_user:
+        if solo and user_id in self._by_user:
             raise TaskExists()
         tid = new_task_id()
         task = TaskContext(task_id=tid, user_id=user_id, kind=kind, lane=lane, priority=priority,
-                           workdir=self.root / "tasks" / str(user_id) / tid, title=title, chat_id=chat_id)
+                           workdir=self.root / "tasks" / str(user_id) / tid, title=title, chat_id=chat_id, solo=solo)
         task.on_close(self._forget)
         return task
 
@@ -101,12 +104,13 @@ class TaskManager:
         """Queue a task; returns its 1-based position in its lane (1 = starts next/now)."""
         if not self.accepting:
             raise BotError("restarting")
-        if task.user_id in self._by_user and self._by_user[task.user_id] != task.task_id:
+        if task.solo and task.user_id in self._by_user and self._by_user[task.user_id] != task.task_id:
             raise TaskExists()
         lane = self.lanes[task.lane]
         self.tasks[task.task_id] = task
         self._runners[task.task_id] = runner
-        self._by_user[task.user_id] = task.task_id
+        if task.solo:
+            self._by_user[task.user_id] = task.task_id
         async with lane.cond:
             lane.queue.append((task.priority, next(self._seq), task.task_id))
             lane.queue.sort()
@@ -217,7 +221,7 @@ class TaskManager:
             self._jobs[tid] = asyncio.get_running_loop().create_task(self._run(lane, task), name=f"task-{tid}")
             for i, (_, _, waiting) in enumerate(list(lane.queue)):
                 if self.on_position and waiting in self.tasks:
-                    asyncio.get_running_loop().create_task(_quiet(self.on_position(self.tasks[waiting], i + 1)))
+                    spawn(_quiet(self.on_position(self.tasks[waiting], i + 1)))
 
     async def _run(self, lane: _Lane, task: TaskContext) -> None:
         runner = self._runners.pop(task.task_id)

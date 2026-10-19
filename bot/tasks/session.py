@@ -17,6 +17,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
+from bot.core.bg import spawn
+
 log = logging.getLogger(__name__)
 
 
@@ -69,7 +71,7 @@ class SessionStore:
 
         def fire() -> None:
             s.timeout = None
-            loop.create_task(_safe(on_timeout(user_id)))
+            spawn(_safe(on_timeout(user_id)), f"timeout-{user_id}")
 
         s.timeout = loop.call_later(seconds, fire)
 
