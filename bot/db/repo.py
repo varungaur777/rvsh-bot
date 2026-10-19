@@ -46,6 +46,7 @@ from typing import Any, Callable
 
 from pymongo.errors import OperationFailure
 
+from bot.core.bg import spawn
 from bot.db.json_backend import JsonStore
 from bot.db.mongo_backend import MongoStore, MongoUnavailable
 from bot.db.outbox import Outbox
@@ -55,7 +56,7 @@ log = logging.getLogger(__name__)
 
 COLLECTIONS = (
     "users", "exams", "exam_urls", "exam_aliases", "exam_results", "quizzes", "quiz_stats", "groups",
-    "batches", "settings", "ocr_cache", "marking_presets", "running_quizzes",
+    "batches", "settings", "ocr_cache", "marking_presets", "running_quizzes", "exam_mht",
 )
 
 
@@ -305,7 +306,7 @@ class Repo:
             try:
                 res = self.on_mongo_state(healthy, replayed)
                 if asyncio.iscoroutine(res):
-                    asyncio.get_running_loop().create_task(res)
+                    spawn(res, "mongo-state")
             except Exception:
                 log.exception("on_mongo_state callback failed")
 
