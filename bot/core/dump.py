@@ -9,7 +9,8 @@ Public API
 - ``notify(text)`` — queued, never blocks, never raises. Small texts within ``batch_window_s`` are joined
   into one message (≤ 4096 chars).
 - ``send_file(path, caption, delete_after=False)`` — queued document upload (log files, tracebacks).
-- ``report_error(exc, where, error_id) -> str`` — logs + queues a dump report; returns the error id.
+- ``report_error(exc, where, error_id) -> str`` — logs + queues a dump report; returns the error id. A chat that
+  refused the bot (``sender.undeliverable``: blocked, can't post, slow mode, gone) is only logged — not a bug.
 - ``new_error_id()`` — short id shown to users ("Error ID: K7Q2").
 
 Queue is bounded (``max_queue``); when full the oldest text events are dropped and counted (``dropped``).
@@ -72,6 +73,10 @@ class DumpNotifier:
     def report_error(self, exc: BaseException, where: str, error_id: str | None = None) -> str:
         """Log an unexpected error and queue a dump report with its traceback."""
         error_id = error_id or new_error_id()
+        from bot.core.sender import undeliverable
+        if why := undeliverable(exc):  # a chat refused the bot (blocked, no right to post, slow mode): not a bug
+            log.info("%s in %s: %s (%r) — not reported", error_id, where, why, exc)
+            return error_id
         tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
         log.error("error %s in %s: %r\n%s", error_id, where, exc, tb)
         text = f"⚠️ <b>Error</b> <code>{error_id}</code> in <code>{html.escape(where)}</code>\n<code>{html.escape(repr(exc))[:500]}</code>"

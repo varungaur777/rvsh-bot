@@ -6,10 +6,13 @@ Used by: handlers, progress messages, dump notifier, task log, quiz sessions, br
 Public API
 ----------
 - Priorities: ``INTERACTIVE`` (0) < ``POLL`` (1) < ``PROGRESS`` (2) < ``LOG`` (3) < ``BULK`` (4).
-- ``Sender(client, on_blocked=None)`` · ``await call(chat_id, fn, *args, priority=…, **kw)`` — generic.
+- ``Sender(client, on_blocked=None, on_unwritable=None)`` · ``await call(chat_id, fn, *args, priority=…, cost=1, **kw)``
+  — generic (``cost``: messages the call really sends, e.g. an album of 2 — the extra ones are charged to the chat).
+- ``undeliverable(exc) -> "blocked" | "slowmode" | "cant_write" | "gone" | None``.
   ``bucket(chat_id)`` — that chat's ``TokenBucket`` (the uploader pool reads it to pick a bot).
 - Shortcuts: ``send_message``, ``edit_text``, ``edit_markup``, ``copy``, ``forward``, ``send_document``,
-  ``send_photo``, ``send_poll``, ``delete``, ``answer`` (callback queries; global bucket only).
+  ``send_photo``, ``send_poll``, ``delete``, ``remove`` (delete, or close the card when that is refused — never
+  raises), ``answer`` (callback queries; global bucket only).
 - ``stats()`` for ``/stats``.
 
 Limits (Telegram Bot FAQ, checked 2026-10-12 — spec §4): ≈ 30 messages/s overall → 25/s here; one chat 1/s
@@ -24,6 +27,15 @@ Exceptions → outcome
 - ``MessageNotModified``: returns ``None`` (an edit with identical content is not an error).
 - ``UserIsBlocked`` / ``InputUserDeactivated`` / ``PeerIdInvalid`` for a private chat: ``on_blocked(chat_id)``
   is scheduled (task cleanup, ``blocked_bot=true``) and ``UserBlockedBot`` is raised.
+- The message a send replies to is gone / not valid there (``REPLY_MESSAGE_ID_INVALID``,
+  ``REPLY_TO_MONOFORUM_PEER_INVALID``, a deleted topic …): sent again once **without** the reply (Err.txt 2026-10-19).
+- ``SlowmodeWait`` (a group's slow mode; the bot is not an admin there): the chat bucket pauses that long and the
+  error is raised at once — never waited out (it can be an hour).
+- The chat refuses the bot (``CHAT_SEND_PLAIN_FORBIDDEN`` and every other 403, ``CHAT_WRITE_FORBIDDEN``, banned,
+  private / deleted channel, slow mode): ``on_unwritable(chat_id, reason)`` is scheduled for a group / channel (the
+  ``groups`` doc gets ``can_write: false``) and the original error is raised. ``undeliverable(exc)`` names these
+  cases (``blocked`` / ``slowmode`` / ``cant_write`` / ``gone``) so handlers, the quiz engine and the error reporter
+  treat them as the chat's state, not as a bug: logged, never reported to dump as an error.
 """
 
 from __future__ import annotations
@@ -35,6 +47,7 @@ from typing import Any, Awaitable, Callable
 from pyrogram import errors as tg_errors
 from pyrogram.types import LinkPreviewOptions, ReplyParameters
 
+from bot.core.bg import spawn
 from bot.core.errors import UserBlockedBot
 from bot.core.ratelimit import TokenBucket
 
@@ -43,22 +56,56 @@ log = logging.getLogger(__name__)
 INTERACTIVE, POLL, PROGRESS, LOG, BULK = 0, 1, 2, 3, 4
 NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
 
-_BLOCKED = tuple(getattr(tg_errors, n) for n in ("UserIsBlocked", "InputUserDeactivated", "UserDeactivated",
-                                                   "UserDeactivatedBan", "PeerIdInvalid") if hasattr(tg_errors, n))
+
+
+def _errors(*names: str) -> tuple:
+    return tuple(getattr(tg_errors, n) for n in names if hasattr(tg_errors, n))
+
+
+_BLOCKED = _errors("UserIsBlocked", "InputUserDeactivated", "UserDeactivated", "UserDeactivatedBan", "PeerIdInvalid")
+_USER_GONE = _errors("UserIsBlocked", "InputUserDeactivated", "UserDeactivated", "UserDeactivatedBan")
 _NOT_MODIFIED = getattr(tg_errors, "MessageNotModified", ())
+_SLOWMODE = getattr(tg_errors, "SlowmodeWait", ())
+_REPLY_BAD = _errors("ReplyMessageIdInvalid", "ReplyToMonoforumPeerInvalid", "ReplyToInvalid", "TopicIdInvalid",
+                     "MessageIdInvalid", "TopicDeleted")
+REPLY_ERRORS = _REPLY_BAD  # public: the uploader pool posts with its own reply field
+# the chat refuses the bot (every 403 is a permission, never a bug of ours) / the chat is gone for the bot
+_CANT_WRITE = _errors("ChatWriteForbidden", "ChatRestricted", "UserBannedInChannel", "ChatAdminRequired", "TopicClosed",
+                      "TopicDeleted") + (tg_errors.Forbidden,)
+_GONE = _errors("ChannelPrivate", "ChannelInvalid", "ChatIdInvalid", "ChatInvalid", "PeerIdInvalid", "UserIsBot")
+
+
+def undeliverable(exc: BaseException | None) -> str | None:
+    """Why Telegram refused — the chat's state, not a bug: ``"blocked"`` (a user blocked the bot / was deleted),
+    ``"slowmode"``, ``"cant_write"`` (no right to post there / any 403), ``"gone"`` (private, deleted or invalid
+    chat); ``None`` for anything else."""
+    if exc is None:
+        return None
+    if isinstance(exc, UserBlockedBot) or isinstance(exc, _USER_GONE):
+        return "blocked"
+    if isinstance(exc, _SLOWMODE):
+        return "slowmode"
+    if isinstance(exc, _GONE):
+        return "gone"
+    if isinstance(exc, _CANT_WRITE):
+        return "cant_write"
+    return None
 
 
 class Sender:
     def __init__(self, client, *, on_blocked: Callable[[int], Awaitable[Any]] | None = None,
+                 on_unwritable: Callable[[int, str], Awaitable[Any]] | None = None,
                  global_rate: float = 25.0, private_rate: float = 1.0, group_rate: float = 17 / 60,
                  max_retries: int = 3) -> None:
         self.client = client
         self.on_blocked = on_blocked
+        self.on_unwritable = on_unwritable
         self.global_bucket = TokenBucket(global_rate, global_rate)
         self.private_rate, self.group_rate = private_rate, group_rate
         self.max_retries = max_retries
         self._chats: dict[int, TokenBucket] = {}
-        self.counters = {"sent": 0, "flood_waits": 0, "blocked": 0, "errors": 0}
+        self.counters = {"sent": 0, "flood_waits": 0, "blocked": 0, "errors": 0, "unwritable": 0,
+                         "reply_dropped": 0}
 
     def bucket(self, chat_id: int | str | None) -> TokenBucket | None:
         """The rate bucket of a chat (created on first use); ``None`` = global only."""
@@ -76,19 +123,21 @@ class Sender:
 
     async def call(self, chat_id: int | str | None, fn: Callable[..., Awaitable[Any]], *args: Any,
                    priority: int = INTERACTIVE, retries: int | None = None, max_wait: float | None = None,
-                   **kwargs: Any) -> Any:
+                   cost: int = 1, **kwargs: Any) -> Any:
         """Run ``fn(*args, **kwargs)`` after taking a chat token and a global token; handles flood waits.
 
         ``retries`` overrides ``max_retries`` (0 = a FloodWait is raised at once, after pausing the bucket).
         ``max_wait``: give up with ``asyncio.TimeoutError`` if the chat's rate budget has no token within that
-        many seconds — for work that has a cheaper fallback (e.g. dump forwards → uploader bots)."""
+        many seconds — for work that has a cheaper fallback (e.g. dump forwards → uploader bots).
+        ``cost`` > 1 (an album): the extra messages are charged to the chat bucket after the call."""
         if "reply_to_message_id" in kwargs:  # deprecated in Kurigram → reply_parameters
             rid = kwargs.pop("reply_to_message_id")
             if rid:
                 kwargs["reply_parameters"] = ReplyParameters(message_id=rid)
         bucket = self.bucket(chat_id)
         tries = self.max_retries if retries is None else retries
-        for attempt in range(tries + 1):
+        attempt = 0
+        while True:
             if bucket is not None:
                 if max_wait is None:
                     await bucket.acquire(priority)
@@ -98,6 +147,8 @@ class Sender:
             try:
                 result = await fn(*args, **kwargs)
                 self.counters["sent"] += 1
+                if cost > 1 and bucket is not None:
+                    bucket.charge(cost - 1)
                 return result
             except tg_errors.FloodWait as e:
                 wait = float(getattr(e, "value", 5) or 5)
@@ -106,21 +157,43 @@ class Sender:
                 (bucket or self.global_bucket).pause(wait)
                 if wait > 60:
                     self.global_bucket.pause(min(wait, 10))
-                if attempt == tries:
+                if attempt >= tries:
                     raise
+                attempt += 1
             except _NOT_MODIFIED:
                 return None
             except _BLOCKED as e:
                 if isinstance(chat_id, int) and chat_id > 0:
                     self.counters["blocked"] += 1
                     if self.on_blocked:
-                        asyncio.get_running_loop().create_task(self.on_blocked(chat_id))
+                        spawn(self.on_blocked(chat_id), "on-blocked")
                     raise UserBlockedBot(detail=f"{chat_id}: {e.__class__.__name__}") from e
+                self._unwritable(chat_id, e)
                 raise
-            except Exception:
-                self.counters["errors"] += 1
+            except _REPLY_BAD:
+                if kwargs.pop("reply_parameters", None) is None:
+                    self.counters["errors"] += 1
+                    raise
+                self.counters["reply_dropped"] += 1  # the message we answer was deleted / is not valid there
+                log.info("reply target not valid in chat %s — sending without the reply", chat_id)
+            except Exception as e:
+                if isinstance(e, _SLOWMODE) and bucket is not None:  # never waited out (can be an hour)
+                    bucket.pause(float(getattr(e, "value", 0) or 0))
+                if undeliverable(e):
+                    self._unwritable(chat_id, e)
+                else:
+                    self.counters["errors"] += 1
                 raise
-        return None
+
+    def _unwritable(self, chat_id, exc: BaseException) -> None:
+        """A chat refused the bot: counted and logged; for a group / channel the hook is told (``groups.can_write``)."""
+        self.counters["unwritable"] += 1
+        log.info("chat %s refused the bot: %s", chat_id, exc.__class__.__name__)
+        if self.on_unwritable and isinstance(chat_id, int) and chat_id < 0:
+            try:
+                spawn(self.on_unwritable(chat_id, undeliverable(exc) or "cant_write"), "on-unwritable")
+            except RuntimeError:  # no running loop (shutdown)
+                pass
 
     # ------------------------------------------------------------ shortcuts
     def send_message(self, chat_id, text, *, priority=INTERACTIVE, **kw):
@@ -149,6 +222,24 @@ class Sender:
 
     def delete(self, chat_id, message_ids, *, priority=PROGRESS):
         return self.call(chat_id, self.client.delete_messages, chat_id, message_ids, priority=priority)
+
+    async def remove(self, chat_id, message_id: int, closed_text: str | None = None) -> bool:
+        """Delete one of the bot's own messages (a used card); when Telegram refuses (older than 48 h, no right —
+        ``MESSAGE_DELETE_FORBIDDEN``, Err.txt) its buttons are removed instead (the text replaced by ``closed_text``
+        when given). Never raises; True when it was deleted."""
+        try:
+            await self.delete(chat_id, message_id)
+            return True
+        except Exception as e:
+            log.info("message %s in %s not deleted (%s) — closing it instead", message_id, chat_id, e.__class__.__name__)
+        try:
+            if closed_text:
+                await self.edit_text(chat_id, message_id, closed_text, reply_markup=None)
+            else:
+                await self.edit_markup(chat_id, message_id, None)
+        except Exception:
+            pass
+        return False
 
     async def answer(self, callback_query_id: str, text: str | None = None, *, show_alert: bool = False, **kw):
         """Answer a button press (global bucket only — answers are not chat messages). A press answered too late

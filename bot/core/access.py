@@ -17,6 +17,8 @@ Exceptions → outcome (error wrapper)
 ------------------------------------
 - ``BotError`` → friendly text ``error_<key>`` (or ``error_generic``) to the user; nothing raw.
 - ``UserBlockedBot`` → silently ignored (cleanup already scheduled by the sender).
+- the chat refuses the bot (``sender.undeliverable``: no right to post, slow mode, a gone chat) → logged; a button
+  press gets a short alert (``cant_<why>``); nothing to dump (2026-10-19, Err.txt).
 - anything else → dump report with a short error id; the user sees ``error_generic`` with that id.
 - ``StopPropagation``/``ContinuePropagation`` from Kurigram pass through untouched.
 """
@@ -35,6 +37,7 @@ from pyrogram.types import CallbackQuery, Message
 
 from bot.core.errors import BotError, UserBlockedBot
 from bot.core.ratelimit import TokenBucket
+from bot.core.sender import undeliverable
 from bot.ui.keyboards import btn, cb, kb, parse_cb
 from bot.ui.texts import t
 
@@ -163,8 +166,8 @@ def guard(role: str = "user", *, force_sub: bool = True, private_only: bool = Fa
                 return
             try:
                 if uid is None:  # anonymous admin / channel post
-                    if chat is not None and await app.access.is_banned(0, chat):
-                        return
+                    if chat is not None and (chat.type == enums.ChatType.CHANNEL or await app.access.is_banned(0, chat)):
+                        return  # a channel's own posts (a dump channel too) are never commands for the bot
                     if anon and role == "user":
                         return await fn(client, update)
                     if role == "user" and not private_only and _anonymous_admin(update):
@@ -217,6 +220,13 @@ def guard(role: str = "user", *, force_sub: bool = True, private_only: bool = Fa
                     text = t("error_generic", error_id=app.dump.report_error(e, fn.__qualname__))
                 await _deny(app, update, text)
             except Exception as e:
+                if why := undeliverable(e):  # the chat refuses the bot (Err.txt 2026-10-19): its state, not a bug
+                    log.info("%s: %s in chat %s (%s)", fn.__qualname__, why, getattr(chat, "id", None), e.__class__.__name__)
+                    if is_cb:
+                        with contextlib.suppress(Exception):
+                            await app.sender.answer(update.id, t(f"cant_{why}") if why != "blocked" else None,
+                                                    show_alert=why != "blocked")
+                    return
                 error_id = app.dump.report_error(e, fn.__qualname__)
                 await _deny(app, update, t("error_generic", error_id=error_id))
 
