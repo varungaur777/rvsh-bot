@@ -125,6 +125,7 @@
 | `bot/handlers/adminpanel.py` | ⚙️ Admin Panel hub: health line, a button per admin tool (owner: Bot settings, Database); in-message screens replace the panel, conversation tools run their command through its own guard | admin handler modules, stats_view | handlers/basic.nav |
 | `bot/handlers/results.py` | `/results` flow: exam → scope → marking (per section) → heavy-lane task | results, compute, delivery | handlers |
 | `tools/import_results.py` | import saved sheets into `exam_results` (stop the bot first) | parsers, results | owner |
+| `tools/vercel_relay/api/relay.py` | Vercel function in Mumbai (`bom1`): opens exam links from an Indian IP for the bot (POST: method/url/headers/body → raw answer + `X-Relay-Status`/`X-Relay-Headers`, redirects not followed; GET browser checks `?ip=1`, `?url=`); `RELAY_TOKEN` | stdlib | Vercel; bot relay support next |
 | `tools/import_users.py` | users of another Mongo database (old `noteshub`) → Telegram data only; existing users keep theirs (stop the bot first) | repo, pymongo | owner |
 | `bot/jsonq/parse.py` | question JSON files (`/json`) → ExamData → bundle: HTML → mini-markup (styles, lists), image links, each language's own answer + explanation, same-text files = one language; summary + fingerprint; `inspect_zip` (`/json_batch`: safe unzip, natural order, skips listed) | parsers.common, exam.bundle | jsonq.runner, handlers.jsoncmd |
 | `bot/jsonq/fetch.py` | image links → files (public hosts only, manual redirects, size caps, sniffed image types) | aiohttp | jsonq.runner |
