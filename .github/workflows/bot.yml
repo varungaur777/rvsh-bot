@@ -48,13 +48,19 @@ jobs:
           python-version: "3.13"
           cache: pip
 
+      # A slow Ubuntu mirror once held this step for 10+ min while no bot was running (2026-11-04): apt gives up
+      # on a stalled download after 30 s and retries; the step has a hard limit; if it still fails the bot starts
+      # anyway (Pango ships with the runner; OCR / Noto fonts are extras).
       - name: System packages (Tesseract Hindi + English, Pango, cloudflared)
         if: steps.gate.outputs.skip != '1'
+        timeout-minutes: 8
+        continue-on-error: true
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends tesseract-ocr tesseract-ocr-eng tesseract-ocr-hin \
+          APT="-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30"
+          sudo apt-get $APT update -q
+          sudo apt-get $APT install -y -q --no-install-recommends tesseract-ocr tesseract-ocr-eng tesseract-ocr-hin \
             libpango-1.0-0 libpangoft2-1.0-0 libharfbuzz-subset0 fonts-noto-core wget
-          sudo curl -fsSL -o /usr/local/bin/cloudflared \
+          sudo curl -fsSL --retry 3 --max-time 120 -o /usr/local/bin/cloudflared \
             https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
           sudo chmod +x /usr/local/bin/cloudflared
 
