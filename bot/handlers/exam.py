@@ -19,6 +19,7 @@ The held task exists from the first input; every timeout or /cancel closes it (w
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import html
 import logging
 import time
@@ -204,6 +205,27 @@ async def on_text(client, message) -> None:
             bar = bars[item["seq"]] = col.transfers.add("fetch", "page files", total, unit="items")
         bar.update(done, total)
 
+    # The fetch (fetch-gate queue + remote fetch server, minutes when sites are slow) runs as a child job of the
+    # task, NOT inside this handler: Kurigram handles updates on a few dispatcher workers, and a handler that waits
+    # here holds one — a busy hour (many links queued) then stalled every update for every user by ~10 min
+    # ("update handled 590 s after it was sent", 2026-11-04).
+    task.spawn(_fetch_links(app, task, sess, chat_id, user, urls, status, assets, bars))
+
+
+async def _fetch_links(app, task, sess, chat_id: int, user, urls, status, assets, bars) -> None:
+    try:
+        await _fetch_links_inner(app, task, sess, chat_id, user, urls, status, assets, bars)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:  # this used to run inside @guard: report it the same way
+        error_id = app.dump.report_error(e, "exam.on_text")
+        with contextlib.suppress(Exception):
+            await app.sender.send_message(chat_id, t("error_generic", error_id=error_id))
+        with contextlib.suppress(Exception):
+            await app.tasks.cancel(task.task_id, "system: link fetch failed", status="error")
+
+
+async def _fetch_links_inner(app, task, sess, chat_id: int, user, urls, status, assets, bars) -> None:
     items = await inputs.add_urls(app, task, urls, status, assets, gate=app.gates.fetch,
                                   priority=app.access.priority(user.id))
     for bar in bars.values():
@@ -304,7 +326,9 @@ async def on_button(client, query) -> None:
             return await _confirm(app, chat_id, uid, sess, task)
         else:
             return await _press(app, query, uid, sess, task, arg, chat_id, msg_id)
-    await _inspect(app, chat_id, uid, sess, task)  # long (download + read): outside the lock
+    # long (prepare queue + download + read): a child job of the task, so this handler frees its dispatcher
+    # worker at once (see on_text) — _inspect reports its own errors
+    task.spawn(_inspect(app, chat_id, uid, sess, task))
 
 
 _SLOW = ("done", "ok", "cancel")

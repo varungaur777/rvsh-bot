@@ -100,6 +100,9 @@ class App:
         self.client = Client(
             "main", api_id=self.config.api_id, api_hash=self.config.api_hash, bot_token=self.config.bot_token,
             workdir=str(self.root / "sessions"), parse_mode=enums.ParseMode.HTML, sleep_threshold=10,
+            # update dispatcher workers: Kurigram's default is CPUs + 4 (6 on a 2-CPU server) — a few slow handlers
+            # then delay every other user's updates. Long work runs as task jobs; this is headroom on top of that.
+            workers=64,
             max_concurrent_transmissions=DEFAULTS["tg"]["max_concurrent_transmissions"],
         )
         self.client.app = self
