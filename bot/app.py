@@ -267,9 +267,9 @@ class App:
         try:
             await self.client.set_bot_commands(user_cmds, scope=BotCommandScopeDefault())
             await self.client.set_bot_commands(group_cmds, scope=BotCommandScopeAllGroupChats())
-            for uid in {self.config.owner_id, *(self.settings.get("admins") or [])}:
+            for uid in {self.config.owner_id, *(self.settings.get("super_admins") or []), *(self.settings.get("admins") or [])}:
                 try:
-                    await self.client.set_bot_commands(owner_cmds if uid == self.config.owner_id else admin_cmds,
+                    await self.client.set_bot_commands(owner_cmds if self.access.is_owner(uid) else admin_cmds,
                                                        scope=BotCommandScopeChat(uid))
                 except Exception:
                     pass  # the admin has not started the bot yet

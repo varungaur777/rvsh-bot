@@ -18,7 +18,7 @@ from bot.ui.keyboards import btn, cb, kb, nav_row
 
 
 def hub(app, uid: int):
-    owner = uid == app.config.owner_id
+    owner = app.access.is_owner(uid)
     try:
         issues = stats_view.problems(stats_view.collect(app))
     except Exception:  # the panel must open even if a reading fails
@@ -48,7 +48,7 @@ async def open_tool(client, query, tool: str):
     from bot.handlers import admin, broadcast, dbpanel, files, people, results, settings, taskview
 
     app, uid = client.app, query.from_user.id
-    owner = uid == app.config.owner_id
+    owner = app.access.is_owner(uid)
     if tool == "stats":
         return app.stats_text(), stats_view.keyboard(uid)
     if tool == "task":

@@ -32,6 +32,7 @@ DEFAULTS: dict[str, Any] = {
     "public_enabled": True,
     "force_sub": {"channels": [], "cache_ttl_s": 600},
     "admins": [],
+    "super_admins": [],  # everything the owner can do (owner 2026-11-04); only the owner adds / removes them
     "channel_link": "",
     "admin_contact": "",
     "help_video": "",

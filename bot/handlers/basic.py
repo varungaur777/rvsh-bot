@@ -49,7 +49,7 @@ def help_text(app, uid: int) -> str:
     text = t("help")
     if app.access.is_admin(uid):
         text += t("help_admin")
-    if uid == app.config.owner_id:
+    if app.access.is_owner(uid):
         text += t("help_owner")
     return text
 
