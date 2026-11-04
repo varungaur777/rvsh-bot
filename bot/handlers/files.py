@@ -96,7 +96,7 @@ async def ls_screen(app, uid: int, folder: Path, page: int = 0):
     sess = app.sessions.get(uid)
     entries = await asyncio.to_thread(_listing, app, folder)
     sess.data["ls_dir"], sess.data["ls_entries"] = folder, [e[0] for e in entries]
-    owner = uid == app.config.owner_id
+    owner = app.access.is_owner(uid)
     pages = max(1, -(-len(entries) // PAGE))
     page = max(0, min(page, pages - 1))
     n_files = sum(e[2] for e in entries)
@@ -130,7 +130,7 @@ async def ls_command(client, message) -> None:
     folder = safe_path(app, arg[1]) if len(arg) > 1 else root_of(app)
     if folder is None or not folder.is_dir():
         return await app.sender.send_message(message.chat.id, "No such folder inside the download folder.")
-    if _in_db(app, folder) and uid != app.config.owner_id:
+    if _in_db(app, folder) and not app.access.is_owner(uid):
         return await app.sender.send_message(message.chat.id, "🔒 Only the owner opens the database folder.")
     text, markup = await ls_screen(app, uid, folder)
     await app.sender.send_message(message.chat.id, text, reply_markup=markup)
@@ -161,7 +161,7 @@ async def ls_button(client, query) -> None:
         if i >= len(entries) or not entries[i].exists():
             return await app.sender.answer(query.id, "It's gone — refresh with /ls.", show_alert=True)
         p = entries[i]
-        if _in_db(app, p) and uid != app.config.owner_id:
+        if _in_db(app, p) and not app.access.is_owner(uid):
             return await app.sender.answer(query.id, "🔒 Only the owner opens the database folder.", show_alert=True)
         if p.is_file():
             if p.stat().st_size > 1950 * 1024**2:
@@ -255,7 +255,7 @@ async def rm_command(client, message) -> None:
 
 
 async def _ask_rm(app, chat_id: int, uid: int, p: Path) -> None:
-    if uid != app.config.owner_id:
+    if not app.access.is_owner(uid):
         return await app.sender.send_message(chat_id, "🔒 Only the owner deletes files.")
     files, size, capped = await asyncio.to_thread(du, p)
     sess = app.sessions.get(uid)

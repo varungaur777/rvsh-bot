@@ -3,9 +3,10 @@
 Depends on: ``core.access.guard``, ``core.settings`` (``admins``), ``db.repo`` (users, groups), ``handlers.waits``.
 Used by: ``handlers/__init__.py``, the Admin Panel.
 
-- **/admin** — the owner and every admin (name, username, id). The owner adds (`➕ Add admin` → send an ID,
-  @username or a forwarded message → "Make X an admin?") and removes (`✖️ <name>` → "Sure?"); admins only see the
-  list. Command menus are refreshed for the person changed.
+- **/admin** — the owner, ⭐ super admins and every admin (name, username, id). The owner and super admins add
+  (`➕ Add admin` → send an ID, @username or a forwarded message → "Make X an admin?") and remove admins
+  (`✖️ <name>` → "Sure?"); only the owner adds / removes ⭐ super admins (`⭐ Add super admin`; a super admin can do
+  everything the owner can, owner 2026-11-04); admins only see the list. Command menus are refreshed for the person changed.
 - **/groups** — every group the bot is in (🤖 bot is admin · 👥 member · ⛔ banned · 👋 left) with its member count,
   8 per page; a group's card shows its link — the public one, or (bot is admin) the **private invite link**
   (``events.refresh_info``) —, members, admins (count + names, bots marked), the bot's rights, authorised / banned
@@ -86,22 +87,40 @@ async def _refresh_commands(app) -> None:
 
 
 # ================================================================== /admin
+def _supers(app) -> list[int]:
+    return [a for a in (app.settings.get("super_admins") or []) if a != app.config.owner_id]
+
+
+async def _name(app, uid: int) -> str:
+    return ((((await app.repo.users.get(uid, copy=False)) or {}).get("tg_db") or {}).get("name") or str(uid))[:24]
+
+
 async def admin_screen(app, viewer: int):
     owner = app.config.owner_id
-    admins = [a for a in (app.settings.get("admins") or []) if a != owner]
+    supers = _supers(app)
+    admins = [a for a in (app.settings.get("admins") or []) if a != owner and a not in supers]
     rows = [f"👑 {_who(await app.repo.users.get(owner, copy=False), owner)}  <i>owner</i>"]
+    for a in supers:
+        rows.append(f"⭐ {_who(await app.repo.users.get(a, copy=False), a)}  <i>super admin</i>")
     for i, a in enumerate(admins, 1):
         rows.append(f"{i}. {_who(await app.repo.users.get(a, copy=False), a)}")
-    text = f"👮 <b>Admins</b> · {len(admins)}\n<blockquote>" + "\n".join(rows) + "</blockquote>"
+    text = (f"👮 <b>Admins</b> · {len(admins)}" + (f"  ·  ⭐ {len(supers)} super" if supers else "")
+            + "\n<blockquote>" + "\n".join(rows) + "</blockquote>")
     buttons = []
-    if viewer == owner:
+    if app.access.is_owner(viewer):
         for a in admins:
-            name = (((await app.repo.users.get(a, copy=False)) or {}).get("tg_db") or {}).get("name") or str(a)
-            buttons.append([btn(f"✖️ Remove {name[:24]}", cb("adm", viewer, str(a), "rm"))])
+            buttons.append([btn(f"✖️ Remove {await _name(app, a)}", cb("adm", viewer, str(a), "rm"))])
         buttons.append([btn("➕ Add admin", cb("adm", viewer, "", "add"), style="success")])
-        text += "\nAdmins can use every admin command. Only you (the owner) add or remove them."
+        if viewer == owner:
+            for a in supers:
+                buttons.append([btn(f"✖️ Remove ⭐ {await _name(app, a)}", cb("adm", viewer, str(a), "srm"))])
+            buttons.append([btn("⭐ Add super admin", cb("adm", viewer, "", "sadd"), style="success")])
+            text += ("\nAdmins can use every admin command. ⭐ Super admins can do <b>everything you can</b> "
+                     "(/bot, config.env, /db, /rm, /update…). Only you add or remove super admins.")
+        else:
+            text += "\nYou are a ⭐ super admin: you add / remove admins. Only the owner changes super admins."
     else:
-        text += "\n<i>Only the owner adds or removes admins.</i>"
+        text += "\n<i>Only the owner (and super admins) add or remove admins.</i>"
     return text, kb(*buttons, [btn(t("btn_home"), cb("nav", viewer, "home"))])
 
 
@@ -116,37 +135,62 @@ async def admin_button(client, query) -> None:
     app, uid = client.app, query.from_user.id
     data = parse_cb(query.data)
     chat_id, msg_id = query.message.chat.id, query.message.id
-    if uid != app.config.owner_id and data.arg != "back":
+    super_arg = data.arg in ("sadd", "srm", "srmy", "saddy")
+    if data.arg != "back" and not app.access.is_owner(uid):
         return await app.sender.answer(query.id, "Only the owner can change admins.", show_alert=True)
+    if super_arg and uid != app.config.owner_id:
+        return await app.sender.answer(query.id, "Only the owner can change super admins.", show_alert=True)
     target = int(data.obj) if data.obj.lstrip("-").isdigit() else None
     admins = list(app.settings.get("admins") or [])
+    supers = list(app.settings.get("super_admins") or [])
     note = None
-    if data.arg == "add":
+    if data.arg in ("add", "sadd"):
         sess = app.sessions.get(uid)
-        sess.step, sess.ui_message_id = "adm:add", msg_id
+        sess.step, sess.ui_message_id = ("adm:addsup" if data.arg == "sadd" else "adm:add"), msg_id
         await app.sender.answer(query.id)
-        return await app.sender.edit_text(chat_id, msg_id, "➕ <b>Add admin</b>\nSend their user ID, @username, or forward "
+        title = "⭐ <b>Add super admin</b>" if data.arg == "sadd" else "➕ <b>Add admin</b>"
+        return await app.sender.edit_text(chat_id, msg_id, f"{title}\nSend their user ID, @username, or forward "
                                           "a message from them.", reply_markup=kb([btn(t("btn_back"), cb("adm", uid, "", "back"))]))
-    if data.arg == "rm" and target is not None:
+    if data.arg in ("rm", "srm") and target is not None:
         await app.sender.answer(query.id)
         who = _who(await app.repo.users.get(target, copy=False), target)
-        return await app.sender.edit_text(chat_id, msg_id, f"✖️ Remove {who} from admins?\n<i>They become a normal user.</i>",
-                                          reply_markup=kb([btn("✅ Yes, remove", cb("adm", uid, str(target), "rmy"), style="danger")],
+        what, yes = (("super admins", "srmy") if data.arg == "srm" else ("admins", "rmy"))
+        return await app.sender.edit_text(chat_id, msg_id, f"✖️ Remove {who} from {what}?\n<i>They become a normal user.</i>",
+                                          reply_markup=kb([btn("✅ Yes, remove", cb("adm", uid, str(target), yes), style="danger")],
                                                           [btn(t("btn_back"), cb("adm", uid, "", "back"))]))
-    if data.arg == "rmy" and target in admins:
+    if data.arg == "rmy" and target in admins and target not in supers:
         admins.remove(target)
         await app.settings.set("admins", admins, by=uid)
         await _drop_commands(app, target)
-        app.dump.notify(f"👮 Admin removed: <code>{target}</code> by owner")
+        app.dump.notify(f"👮 Admin removed: <code>{target}</code> by <code>{uid}</code>")
         note = "Removed."
-    elif data.arg == "addy" and target is not None and target not in admins and target != app.config.owner_id:
+    elif data.arg == "addy" and target is not None and target not in admins and target not in supers \
+            and target != app.config.owner_id:
         admins.append(target)
         await app.settings.set("admins", admins, by=uid)
         await _refresh_commands(app)
-        app.dump.notify(f"👮 Admin added: <code>{target}</code> by owner")
+        app.dump.notify(f"👮 Admin added: <code>{target}</code> by <code>{uid}</code>")
         note = "Added — they can use admin commands now."
+    elif data.arg == "srmy" and target in supers:
+        supers.remove(target)
+        await app.settings.set("super_admins", supers, by=uid)
+        if target in admins:
+            admins.remove(target)
+            await app.settings.set("admins", admins, by=uid)
+        await _drop_commands(app, target)
+        app.dump.notify(f"⭐ Super admin removed: <code>{target}</code> by owner")
+        note = "Removed."
+    elif data.arg == "saddy" and target is not None and target not in supers and target != app.config.owner_id:
+        supers.append(target)
+        await app.settings.set("super_admins", supers, by=uid)
+        if target in admins:  # promoted: one list only
+            admins.remove(target)
+            await app.settings.set("admins", admins, by=uid)
+        await _refresh_commands(app)
+        app.dump.notify(f"⭐ Super admin added: <code>{target}</code> by owner")
+        note = "Added — they can do everything the owner can now."
     sess = app.sessions.peek(uid)
-    if sess and sess.step == "adm:add":
+    if sess and sess.step in ("adm:add", "adm:addsup"):
         app.sessions.clear(uid)
     await app.sender.answer(query.id, note)
     text, markup = await admin_screen(app, uid)
@@ -161,20 +205,37 @@ async def _drop_commands(app, uid: int) -> None:
         pass
 
 
-async def _take_admin(app, message, sess) -> None:
+async def _take_admin(app, message, sess, super_admin: bool = False) -> None:
     uid = message.from_user.id
+    if not app.access.is_owner(uid) or (super_admin and uid != app.config.owner_id):
+        app.sessions.clear(uid)
+        return
     target = await _from_message(app, message)
     if target is None:
         return await app.sender.send_message(message.chat.id, "I couldn't find that user. Send their numeric ID (they "
                                              "must have started the bot), an @username, or forward a message from them.")
     app.sessions.clear(uid)
-    if target == app.config.owner_id or target in (app.settings.get("admins") or []):
+    if super_admin:
+        if target == app.config.owner_id or target in (app.settings.get("super_admins") or []):
+            return await app.sender.send_message(message.chat.id, "They are already a super admin.")
+        who = _who(await app.repo.users.get(target, copy=False), target)
+        return await app.sender.send_message(
+            message.chat.id, f"⭐ Make {who} a <b>super admin</b>?\n<i>They can do everything you can — /bot settings, "
+            "config.env (tokens), /db, /rm, /update, add and remove admins. Only you can remove them.</i>",
+            reply_markup=kb([btn("✅ Yes, make super admin", cb("adm", uid, str(target), "saddy"), style="success")],
+                            [btn(t("btn_back"), cb("adm", uid, "", "back"))]))
+    if target == app.config.owner_id or target in (app.settings.get("admins") or []) \
+            or target in (app.settings.get("super_admins") or []):
         return await app.sender.send_message(message.chat.id, "They are already an admin.")
     who = _who(await app.repo.users.get(target, copy=False), target)
     await app.sender.send_message(message.chat.id, f"👮 Make {who} an admin?\n<i>They can use every admin command "
                                   "(broadcast, tasks, results, settings).</i>",
                                   reply_markup=kb([btn("✅ Yes, make admin", cb("adm", uid, str(target), "addy"), style="success")],
                                                   [btn(t("btn_back"), cb("adm", uid, "", "back"))]))
+
+
+async def _take_super(app, message, sess) -> None:
+    await _take_admin(app, message, sess, super_admin=True)
 
 
 # ================================================================== /groups
@@ -260,7 +321,7 @@ async def group_card(app, viewer: int, chat_id: int, refresh: bool = False):
            else btn("⛔ Ban group", cb("grp", viewer, sid, "ban"), style="danger"))
     aq = (btn("🎲 Turn auto quiz off", cb("grp", viewer, sid, "aqoff")) if g.get("auto_quiz", True)
           else btn("🎲 Turn auto quiz on", cb("grp", viewer, sid, "aqon"), style="success"))
-    rows = [[auth]] if app.access.role(viewer) == "owner" else []  # owner only (owner 2026-10-13)
+    rows = [[auth]] if app.access.is_owner(viewer) else []  # owner only (owner 2026-10-13)
     return text[:4000], kb(*rows, [ban], [aq], [btn("🔄 Refresh info", cb("grp", viewer, sid, "gref"))],
                            [btn(t("btn_back"), cb("grp", viewer, "", "p_0"))])
 
@@ -575,7 +636,7 @@ async def groups_button(client, query) -> None:
     if target is not None and target < 0 and arg in ("aqon", "aqoff"):
         await app.repo.groups.update(target, {"$set": {"auto_quiz": arg == "aqon"}}, upsert=False)
         note = "Auto quiz on for this group." if arg == "aqon" else "Auto quiz off for this group."
-    elif target is not None and target < 0 and arg in ("auth", "unauth") and app.access.role(uid) != "owner":
+    elif target is not None and target < 0 and arg in ("auth", "unauth") and not app.access.is_owner(uid):
         return await app.sender.answer(query.id, "Only the owner can authorise groups.", show_alert=True)
     elif target is not None and target < 0 and arg in ("auth", "unauth", "ban", "unban"):
         field, value = ("authorised", arg == "auth") if arg in ("auth", "unauth") else ("banned", arg == "ban")
@@ -632,4 +693,4 @@ async def _take_group(app, message, sess) -> None:
     await app.sender.send_message(message.chat.id, text, reply_markup=markup)
 
 
-WAITERS.update({"adm:add": _take_admin, "usr:find": _take_user, "grp:add": _take_group})
+WAITERS.update({"adm:add": _take_admin, "adm:addsup": _take_super, "usr:find": _take_user, "grp:add": _take_group})

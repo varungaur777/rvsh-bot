@@ -53,7 +53,7 @@ LIVE_ENV = {"FETCH_API_URL": "fetch_api_url", "FETCH_API_TOKEN": "fetch_api_toke
 
 def _allowed(app, uid: int, panel: str) -> bool:
     role = sp.PANELS[panel]["role"]
-    return uid == app.config.owner_id if role == "owner" else app.access.is_admin(uid)
+    return app.access.is_owner(uid) if role == "owner" else app.access.is_admin(uid)
 
 
 async def _open(client, message, panel: str) -> None:
@@ -435,7 +435,7 @@ async def _fetch_check_text(app) -> str:
 
 
 async def _take_env_guarded(app, message, sess) -> None:
-    if message.from_user.id != app.config.owner_id:  # only the owner reaches this step; checked again anyway
+    if not app.access.is_owner(message.from_user.id):  # only the owner reaches this step; checked again anyway
         app.sessions.clear(message.from_user.id)
         return
     await _take_env(app, message, sess)

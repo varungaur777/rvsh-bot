@@ -5,8 +5,10 @@ Used by: every handler through ``@guard(...)``.
 
 Public API
 ----------
-- ``Access(app)`` · ``blocked_action`` (re-run by the "I've joined" button) · ``role(user_id) -> "owner" | "admin" | "user"`` · ``priority(user_id)`` ·
-  ``is_admin(user_id)`` · ``await ensure_user(user)`` · ``await group_authorised(chat)``
+- ``Access(app)`` · ``blocked_action`` (re-run by the "I've joined" button) ·
+  ``role(user_id) -> "owner" | "super_admin" | "admin" | "user"`` · ``priority(user_id)`` · ``is_admin(user_id)`` ·
+  ``is_owner(user_id)`` (the owner **or a super admin** — every owner-only thing; only the real owner
+  (``config.owner_id``) adds / removes super admins) · ``await ensure_user(user)`` · ``await group_authorised(chat)``
 - Bot closed (``/off``): only admins / the owner — and everyone **inside an authorised group** (``/auth``, owner
   2026-10-13: "jab bot off ho to keval auth groups mai chle").
 - ``guard(role="user", force_sub=True, private_only=False, shared=False)`` — decorator for message and
@@ -42,7 +44,7 @@ from bot.ui.keyboards import btn, cb, kb, parse_cb
 from bot.ui.texts import t
 
 log = logging.getLogger(__name__)
-_ROLE_RANK = {"user": 0, "admin": 1, "owner": 2}
+_ROLE_RANK = {"user": 0, "admin": 1, "super_admin": 2, "owner": 2}  # a super admin passes every owner check
 REPLAYING: contextvars.ContextVar[bool] = contextvars.ContextVar("fsub_replay", default=False)  # "I've joined" re-runs
 BLOCKED_KEEP_S, BLOCKED_MAX, ASK_AGAIN_S = 600, 30, 30  # force-sub: actions kept to re-run; one join message per burst
 
@@ -62,15 +64,21 @@ class Access:
             return "user"
         if user_id == self.app.config.owner_id:
             return "owner"
+        if user_id in (self.app.settings.get("super_admins") or []):
+            return "super_admin"
         if user_id in (self.app.settings.get("admins") or []):
             return "admin"
         return "user"
 
     def is_admin(self, user_id: int | None) -> bool:
-        return self.role(user_id) in ("admin", "owner")
+        return self.role(user_id) in ("admin", "super_admin", "owner")
+
+    def is_owner(self, user_id: int | None) -> bool:
+        """The owner or a super admin: may do everything the owner does."""
+        return self.role(user_id) in ("super_admin", "owner")
 
     def priority(self, user_id: int) -> int:
-        return {"owner": 0, "admin": 1}.get(self.role(user_id), 2)
+        return {"owner": 0, "super_admin": 0, "admin": 1}.get(self.role(user_id), 2)
 
     # ------------------------------------------------------------ users & groups
     async def ensure_user(self, user) -> dict | None:
