@@ -34,6 +34,8 @@ Public API
   - every page's images (``src``, lazy ``data-src``/``data-original``/``srcset``), stylesheets **and what the
     stylesheets reference** (``url(...)`` fonts/backgrounds, ``@import``) are fetched and packed with the HTML into
     an MHT (same layout Chrome produces). One asset cache per fetch; pages are packed in parallel.
+  - ``relay=(url, token)`` (``tools/vercel_relay``, a free Vercel function in Mumbai): every request — pages,
+    postbacks, assets (in batches) — is made from India; cookies and redirects are handled here.
 - ``await fetch_remote(api_url, token, url, timeout=120, assets=True) -> list[Page]`` — the same, done by a remote
   fetch server.
 - ``assets=False`` (both): a light check — the page(s) only, no images / CSS / other-language postbacks (``/links``
@@ -95,6 +97,7 @@ RETRY_STATUS = frozenset({408, 425, 429, 500, 502, 503, 504, 520, 521, 522, 523,
 BACKOFF_S = (1.5, 4.0, 8.0)
 PAGE_TRIES, ASSET_TRIES = 3, 3
 PROBE_PARALLEL = 2  # EDQT section pages probed at a time (after the user's own link)
+RELAY_BATCH, RELAY_PARALLEL_BATCHES = 40, 3  # Mumbai relay: assets per call · calls at once (≈ 48 downloads there)
 log = logging.getLogger(__name__)
 
 
@@ -152,18 +155,22 @@ AssetsFn = Callable[[int, int], None]  # (assets done, assets known so far)
 
 async def fetch_exam(url: str, *, proxy: str | None = None, timeout: float = 30, concurrency: int = 48,
                      progress: StatusFn | None = None, kind: str | None = None, engine: str = "auto",
-                     on_assets: AssetsFn | None = None, other_language: bool = True, assets: bool = True) -> list[Page]:
+                     on_assets: AssetsFn | None = None, other_language: bool = True, assets: bool = True,
+                     relay: tuple[str, str] | None = None) -> list[Page]:
     """``kind`` overrides URL detection (tests serve pages from 127.0.0.1). ``engine``: ``auto``/``chrome`` —
     everything as Chrome (``curl_cffi``; ``auto`` without it: the wget hybrid); ``wget`` — pages as Chrome, assets
     by wget, wget's failures retried as Chrome; ``aiohttp`` — plain Python, everything in-process.
     ``assets=False`` — a **light check** (``/links``: exam, date, shift and the sheet's language): only the page(s),
-    no images / CSS, no other-language postbacks; the MHT holds the HTML alone (enough for the parsers)."""
+    no images / CSS, no other-language postbacks; the MHT holds the HTML alone (enough for the parsers).
+    ``relay`` — ``(url, token)`` of the Mumbai relay (``tools/vercel_relay``): every request is made from there."""
     url = normalize_url(url)
     kind = kind or detect_kind(url)
     if kind is None:
         raise FetchError("unsupported_url")
     args = (proxy, timeout, concurrency, on_assets)
-    if engine == "aiohttp":
+    if relay and relay[0]:  # (url, token): every request through the Mumbai relay (engine / proxy not used)
+        dl = _RelayDownloader(relay, *args)
+    elif engine == "aiohttp":
         dl = _HttpDownloader(*args, chrome=False)
     elif engine == "chrome" or (engine == "auto" and _cffi is not None):
         dl = _HttpDownloader(*args)
@@ -614,6 +621,131 @@ class _HttpDownloader(_Downloader):
             self.sem.shrink()  # the server is struggling: fewer at a time, then try again
             await asyncio.sleep(wait)
         self._resolve(url, (ctype, data) if ok else None)
+
+
+class _RelayDownloader(_HttpDownloader):
+    """Every request goes through the **Mumbai relay** (``tools/vercel_relay``: a free Vercel function with an Indian
+    IP) — for a bot that runs abroad, where exam sites answer 403. The relay makes the request and returns the answer
+    unchanged; this side keeps the cookies (ASP.NET session for the other-language postbacks) and follows redirects,
+    so the retry / back-off logic of ``_HttpDownloader`` applies as-is. Assets go ``RELAY_BATCH`` per call (a sheet's
+    ~500 images in ~13 calls — the free plan counts calls); what a batch misses is fetched one by one."""
+
+    def __init__(self, relay: tuple[str, str], *args) -> None:
+        super().__init__(*args, chrome=False)
+        self.relay_url, self.relay_token = relay[0].rstrip("/"), relay[1]
+        if not self.relay_url.endswith("/api/relay"):
+            self.relay_url += "/api/relay"
+        self.http = "relay"
+        self.jar: dict[str, dict[str, str]] = {}  # host → cookie name → value
+
+    async def __aenter__(self):
+        tmo = aiohttp.ClientTimeout(total=None, sock_connect=self.timeout, sock_read=90)
+        self.s = aiohttp.ClientSession(timeout=tmo, headers={"X-Token": self.relay_token})
+        self.sem = _Limiter(self.concurrency)
+        self.batches = asyncio.Semaphore(RELAY_PARALLEL_BATCHES)
+        return self
+
+    async def __aexit__(self, *exc) -> None:
+        await _Downloader.__aexit__(self, *exc)
+        await self.s.close()
+
+    def _headers(self, url: str, extra: dict | None) -> dict:
+        h = dict(HEADERS)
+        h.update(extra or {})
+        host = urlsplit(url).hostname or ""
+        if self.jar.get(host):
+            h["Cookie"] = "; ".join(f"{k}={v}" for k, v in self.jar[host].items())
+        return h
+
+    def _keep_cookies(self, url: str, headers) -> None:
+        from http.cookies import CookieError, SimpleCookie
+        host = urlsplit(url).hostname or ""
+        for name, value in headers:
+            if name.lower() != "set-cookie":
+                continue
+            c = SimpleCookie()
+            try:
+                c.load(value)
+            except CookieError:
+                continue
+            for k, m in c.items():
+                self.jar.setdefault(host, {})[k] = m.value
+
+    async def _relay_one(self, method: str, url: str, headers: dict, body: bytes | None) -> _Resp:
+        job = {"method": method, "url": url, "headers": headers,
+               "body": base64.b64encode(body).decode() if body else None}
+        async with self.s.post(self.relay_url, json=job) as r:
+            data = await r.read()
+            if r.status == 401:
+                raise FetchError("remote", 401, "the relay refused the token (FETCH_RELAY_TOKEN ≠ RELAY_TOKEN)")
+            if r.status == 413:
+                return _Resp(200, url, {}, None)  # over Vercel's 4.5 MB: treated like an over-cap answer
+            if r.status != 200 or "X-Relay-Status" not in r.headers:  # relay / Vercel trouble: a network error
+                raise aiohttp.ClientError(f"relay answered {r.status}: {data[:200]!r}")
+            pairs = json.loads(base64.b64decode(r.headers.get("X-Relay-Headers") or "W10="))
+            return _Resp(int(r.headers["X-Relay-Status"]), url, _HeaderList(pairs), data)
+
+    async def _send(self, method: str, url: str, *, headers: dict | None = None, data: dict | None = None,
+                    cap: int | None = None) -> _Resp:
+        body = None
+        extra = dict(headers or {})
+        if data is not None:
+            from urllib.parse import urlencode
+            body = urlencode(data).encode()
+            extra.setdefault("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
+        for _hop in range(10):  # redirects followed here, so cookies set on the way are kept
+            r = await self._relay_one(method, url, self._headers(url, extra), body)
+            self._keep_cookies(url, r.headers.items() if hasattr(r.headers, "items") else [])
+            loc = r.headers.get("Location") if r.status in (301, 302, 303, 307, 308) else None
+            if not loc:
+                if cap and r.body is not None and len(r.body) > cap:
+                    return r._replace(body=None)
+                return r
+            url = urljoin(url, loc)
+            if r.status in (301, 302, 303):
+                method, body = "GET", None
+                extra.pop("Content-Type", None)
+        raise aiohttp.ClientError("too many redirects")
+
+    async def _download(self, urls: list[str], referer: str) -> None:
+        chunks = [urls[i:i + RELAY_BATCH] for i in range(0, len(urls), RELAY_BATCH)]
+        await asyncio.gather(*(self._batch(c, referer) for c in chunks))
+
+    async def _batch(self, urls: list[str], referer: str) -> None:
+        missed = list(urls)
+        async with self.batches:
+            try:
+                items = [{"url": u, "headers": self._headers(u, {"Referer": referer})} for u in urls]
+                async with self.s.post(self.relay_url, json={"batch": items}) as r:
+                    got = (await r.json(content_type=None)).get("items") if r.status == 200 else None
+                missed = []
+                for u, it in zip(urls, got or []):
+                    if it.get("status") == 200 and "body" in it:
+                        data = base64.b64decode(it["body"])
+                        if len(data) <= MAX_ASSET_BYTES:
+                            self._resolve(u, ((it.get("ctype") or "application/octet-stream").split(";")[0], data))
+                            continue
+                    missed.append(u)
+                missed += urls[len(got or []):]
+            except (*NET_ERRORS, ValueError, TypeError, AttributeError) as e:
+                log.info("relay batch failed (%s) — fetching %d one by one", type(e).__name__, len(urls))
+                missed = list(urls)
+        if missed:  # one by one, with the usual retries / back-off
+            await asyncio.gather(*(self._one(u, referer) for u in missed))
+
+
+class _HeaderList(dict):
+    """Relay answer headers: case-insensitive ``get`` (last value wins), all pairs kept for ``Set-Cookie``."""
+
+    def __init__(self, pairs) -> None:
+        super().__init__((str(k).lower(), str(v)) for k, v in pairs)
+        self.pairs = [(str(k), str(v)) for k, v in pairs]
+
+    def get(self, key, default=None):
+        return super().get(str(key).lower(), default)
+
+    def items(self):
+        return self.pairs
 
 
 async def _read_capped(r, cap: int) -> bytes | None:

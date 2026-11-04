@@ -10,19 +10,26 @@ Browser checks (GET):
 - ``/api/relay?token=…&ip=1``        → this function's public IP + country (should say IN / Mumbai)
 - ``/api/relay?token=…&url=<link>``  → opens the link from Mumbai and shows the page (or the error status)
 
-Bot use (POST, header ``X-Token``): JSON ``{"method", "url", "headers": {…}, "body": "<base64>"}`` → the target's
-body as-is; ``X-Relay-Status`` = its status, ``X-Relay-Headers`` = base64 JSON list of ``[name, value]`` (all
-``Set-Cookie`` kept), ``X-Relay-Url`` = the URL. Redirects are **not** followed (the bot follows them, keeping its
-cookies). Vercel's response limit is 4.5 MB → a bigger answer gets status 413.
+Bot use (POST, header ``X-Token``):
+- one request: JSON ``{"method", "url", "headers": {…}, "body": "<base64>"}`` → the target's body as-is;
+  ``X-Relay-Status`` = its status, ``X-Relay-Headers`` = base64 JSON list of ``[name, value]`` (all ``Set-Cookie``
+  kept), ``X-Relay-Url`` = the URL. Redirects are **not** followed (the bot follows them, keeping its cookies).
+  Vercel's response limit is 4.5 MB → a bigger answer gets status 413.
+- many GETs at once (a sheet's ~500 images in ~13 calls, not 500 — Vercel's free plan counts calls):
+  ``{"batch": [{"url", "headers"}, …]}`` → JSON ``{"items": [{"status", "ctype", "body": "<base64>"} |
+  {"skip": true} | {"error": "…"}]}`` in the same order, fetched ``BATCH_THREADS`` at a time, redirects followed;
+  items past the size budget come back as ``skip`` (the bot asks for those one by one).
 """
 
 from __future__ import annotations
 
 import base64
+import concurrent.futures
 import hmac
 import json
 import os
 import ssl
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -31,6 +38,9 @@ from http.server import BaseHTTPRequestHandler
 TOKEN = os.environ.get("RELAY_TOKEN", "")
 TIMEOUT = 50  # Vercel stops the function at 60 s (vercel.json maxDuration)
 MAX_BODY = 4_400_000  # Vercel's response cap is 4.5 MB
+BATCH_BUDGET = 3_000_000  # raw bytes per batch answer (base64 + JSON must stay under 4.5 MB)
+BATCH_MAX, BATCH_THREADS, BATCH_ITEM_TIMEOUT = 48, 16, 15
+BATCH_DEADLINE = 42  # s: items not started by then come back as skip (the function must answer within 60 s)
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
       "Chrome/130.0.0.0 Safari/537.36")
 HOP = {"connection", "keep-alive", "proxy-connection", "transfer-encoding", "upgrade", "host", "content-length",
@@ -47,13 +57,13 @@ _PLAIN = urllib.request.build_opener(urllib.request.HTTPSHandler(context=_CTX), 
 _FOLLOW = urllib.request.build_opener(urllib.request.HTTPSHandler(context=_CTX))
 
 
-def _open(opener, method: str, url: str, headers: dict, body: bytes | None):
+def _open(opener, method: str, url: str, headers: dict, body: bytes | None, timeout: float = TIMEOUT):
     """→ (status, [(name, value)], body bytes). HTTP errors are answers too (403, 500…), not failures."""
     h = {k: v for k, v in headers.items() if k.lower() not in HOP}
     h.setdefault("User-Agent", UA)
     req = urllib.request.Request(url, data=body, headers=h, method=method)
     try:
-        r = opener.open(req, timeout=TIMEOUT)
+        r = opener.open(req, timeout=timeout)
     except urllib.error.HTTPError as e:
         r = e
     with r:
@@ -109,6 +119,8 @@ class handler(BaseHTTPRequestHandler):
         try:
             n = int(self.headers.get("Content-Length") or 0)
             job = json.loads(self.rfile.read(n) or b"{}")
+            if isinstance(job.get("batch"), list):
+                return self._batch(job["batch"])
             method = str(job.get("method") or "GET").upper()
             url = str(job["url"])
             headers = {str(k): str(v) for k, v in (job.get("headers") or {}).items()}
@@ -127,3 +139,40 @@ class handler(BaseHTTPRequestHandler):
         ctype = next((v for k, v in rh if k.lower() == "content-type"), "application/octet-stream")
         return self._send(200, data, ctype, {"X-Relay-Status": str(status), "X-Relay-Headers": packed,
                                              "X-Relay-Url": url})
+
+    def _batch(self, items: list) -> None:
+        jobs = []
+        for it in items[:BATCH_MAX]:
+            url = str((it or {}).get("url") or "")
+            headers = {str(k): str(v) for k, v in ((it or {}).get("headers") or {}).items()}
+            jobs.append((url, headers))
+
+        deadline = time.monotonic() + BATCH_DEADLINE
+
+        def one(job):
+            url, headers = job
+            if time.monotonic() > deadline:
+                return {"skip": True}
+            if not url.lower().startswith(("http://", "https://")):
+                return {"error": "bad url"}
+            try:
+                status, rh, data = _open(_FOLLOW, "GET", url, headers, None, BATCH_ITEM_TIMEOUT)
+            except Exception as e:  # noqa: BLE001 — per item; the bot retries it alone
+                return {"error": type(e).__name__}
+            ctype = next((v for k, v in rh if k.lower() == "content-type"), "application/octet-stream")
+            return {"status": status, "ctype": ctype, "data": data}
+
+        with concurrent.futures.ThreadPoolExecutor(BATCH_THREADS) as ex:
+            done = list(ex.map(one, jobs))
+        out, used = [], 0
+        for r in done:
+            data = r.pop("data", None)
+            if data is not None:
+                if used + len(data) > BATCH_BUDGET:
+                    out.append({"skip": True})
+                    continue
+                used += len(data)
+                r["body"] = base64.b64encode(data).decode()
+            out.append(r)
+        out += [{"skip": True}] * (len(items) - len(jobs))
+        return self._send(200, json.dumps({"items": out}).encode(), "application/json")

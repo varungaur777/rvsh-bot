@@ -23,7 +23,7 @@ from pathlib import Path
 from dotenv import dotenv_values
 
 _SECRET_KEYS = {"api_hash", "bot_token", "image_bot_tokens", "mongo_url", "cloudflared_token", "session_string", "http_proxy",
-                "fetch_api_token"}
+                "fetch_api_token", "fetch_relay_token"}
 
 
 class ConfigError(Exception):
@@ -55,6 +55,8 @@ class Config:
     session_string: str = ""
     fetch_api_url: str = ""
     fetch_api_token: str = ""
+    fetch_relay_url: str = ""  # FETCH_RELAY_URL: Mumbai relay (tools/vercel_relay) — exam links opened from India
+    fetch_relay_token: str = ""
     force_sub_channels: tuple[str, ...] = ()  # FORCE_SUB_CHANNELS: ids or @names, comma-separated
     extra: dict[str, str] = field(default_factory=dict)
 
@@ -140,5 +142,7 @@ def load_config(env_file: str | Path | None = "", environ: dict | None = None) -
         session_string=_str(env, "SESSION_STRING"),
         fetch_api_url=_str(env, "FETCH_API_URL").rstrip("/"),
         fetch_api_token=_str(env, "FETCH_API_TOKEN"),
+        fetch_relay_url=_str(env, "FETCH_RELAY_URL").rstrip("/"),
+        fetch_relay_token=_str(env, "FETCH_RELAY_TOKEN"),
         force_sub_channels=tuple(c.strip() for c in _str(env, "FORCE_SUB_CHANNELS").replace(";", ",").split(",") if c.strip()),
     )

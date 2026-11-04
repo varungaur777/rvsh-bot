@@ -38,8 +38,20 @@ https://<your-project>.vercel.app/api/relay?token=<RELAY_TOKEN>&url=<an exam res
 - `site answered 403` → the site blocks this IP too; use an Indian residential proxy instead (`HTTP_PROXY`).
 
 ## 4. The bot
-Bot support for the relay is the next step (after step 3 says ✅): settings `FETCH_RELAY_URL` +
-`FETCH_RELAY_TOKEN`.
+GitHub → repository → Settings → Secrets and variables → Actions → **New repository secret**:
+| Name | Value |
+|---|---|
+| `FETCH_RELAY_URL` | `https://<your-project>.vercel.app` |
+| `FETCH_RELAY_TOKEN` | the same value as `RELAY_TOKEN` on Vercel |
+
+Then start a new run (Actions → bot → Run workflow). Elsewhere (Docker / VPS): the same two lines in `.env`, or
+`/bot` → 🔑 config.env → Mumbai relay URL / token (used at once, no restart).
+
+`/bot` → Network → Fetching links: **Direct** (every link through the relay) or **Auto** (relay; the fetch server
+only if the relay fails and one is set). **Remote** skips the relay.
+
+How the bot uses it: pages and the other-language postbacks one request per call (cookies and redirects kept by
+the bot); a sheet's images ~40 per call — about 15 calls per sheet.
 
 ## Limits (Vercel Hobby)
 60 s per request, 4.5 MB per answer (one page or one image — fine for exam sheets), a monthly free allowance of

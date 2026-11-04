@@ -11,7 +11,8 @@
 # Needs (Settings → Secrets and variables → Actions → Secrets): BOT_TOKEN, API_ID, API_HASH, OWNER_ID,
 # DUMP_CHANNEL_ID, IMAGE_DUMP_CHANNEL_ID, BRANDING, IMAGE_BOT_TOKENS, MONGO_URL (required here: the runner's disk is
 # wiped after every job). Optional: QUIZ_DUMP_CHANNEL_ID, FORCE_SUB_CHANNELS, HTTP_PROXY, CLOUDFLARED_TOKEN,
-# WEBAPP_BASE_URL. Start: Actions → "bot" → Run workflow. Stop: cancel the run (and disable the workflow).
+# WEBAPP_BASE_URL, FETCH_RELAY_URL + FETCH_RELAY_TOKEN (exam links opened from India by the free Mumbai relay —
+# tools/vercel_relay/README.md), FETCH_API_URL + FETCH_API_TOKEN. Start: Actions → "bot" → Run workflow. Stop: cancel the run (and disable the workflow).
 
 name: bot
 
@@ -91,6 +92,10 @@ jobs:
           HTTP_PROXY: ${{ secrets.HTTP_PROXY }}
           CLOUDFLARED_TOKEN: ${{ secrets.CLOUDFLARED_TOKEN }}
           WEBAPP_BASE_URL: ${{ secrets.WEBAPP_BASE_URL }}
+          FETCH_RELAY_URL: ${{ secrets.FETCH_RELAY_URL }}
+          FETCH_RELAY_TOKEN: ${{ secrets.FETCH_RELAY_TOKEN }}
+          FETCH_API_URL: ${{ secrets.FETCH_API_URL }}
+          FETCH_API_TOKEN: ${{ secrets.FETCH_API_TOKEN }}
         run: |
           mkdir -p "$DOWNLOAD_ROOT" && touch "$ENV_FILE"
           # the next run, ~10 min before this one stops (the new bot takes over through the lease)

@@ -40,12 +40,15 @@ ENV_KEYS = (("BOT_TOKEN", "Main bot token", True), ("IMAGE_BOT_TOKENS", "Uploade
             ("DUMP_CHANNEL_ID", "Dump channel ID", False), ("IMAGE_DUMP_CHANNEL_ID", "Image dump channel ID", False),
             ("QUIZ_DUMP_CHANNEL_ID", "Quiz dump channel ID (new quizzes; empty = dump)", False),
             ("BRANDING", "Branding name", False), ("HTTP_PROXY", "Proxy", True), ("FETCH_API_URL", "Fetch server URL", False),
-            ("FETCH_API_TOKEN", "Fetch server token", True), ("TESSERACT_CMD", "Tesseract path", False),
+            ("FETCH_API_TOKEN", "Fetch server token", True),
+            ("FETCH_RELAY_URL", "Mumbai relay URL (Vercel)", False), ("FETCH_RELAY_TOKEN", "Mumbai relay token", True),
+            ("TESSERACT_CMD", "Tesseract path", False),
             ("FORCE_SUB_CHANNELS", "Must-join channels (IDs or @names)", False),
             ("WEBAPP_BASE_URL", "Web App URL", False), ("CLOUDFLARED_TOKEN", "Cloudflare tunnel token", True),
             ("RUNTIME_PROFILE", "Runtime profile (empty = auto)", False))
 # read on every use (net.service) → a new value is used at once, no restart
-LIVE_ENV = {"FETCH_API_URL": "fetch_api_url", "FETCH_API_TOKEN": "fetch_api_token", "HTTP_PROXY": "http_proxy"}
+LIVE_ENV = {"FETCH_API_URL": "fetch_api_url", "FETCH_API_TOKEN": "fetch_api_token", "HTTP_PROXY": "http_proxy",
+            "FETCH_RELAY_URL": "fetch_relay_url", "FETCH_RELAY_TOKEN": "fetch_relay_token"}
 
 
 def _allowed(app, uid: int, panel: str) -> bool:
@@ -401,7 +404,7 @@ def _apply_live(app, key: str, value: str) -> bool:
     attr = LIVE_ENV.get(key)
     if attr is None or (key in os.environ and os.environ[key] != value):
         return False
-    app.config = dataclasses.replace(app.config, **{attr: value.rstrip("/") if key == "FETCH_API_URL" else value})
+    app.config = dataclasses.replace(app.config, **{attr: value.rstrip("/") if key in ("FETCH_API_URL", "FETCH_RELAY_URL") else value})
     return True
 
 
