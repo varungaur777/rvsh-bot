@@ -108,10 +108,15 @@ class TaskContext:
         self.ended_by = ended_by or self.ended_by or ("user" if status == "completed" else None)
         self.error_id = error_id or self.error_id
         self.cancel_event.set()
-        for child in list(self._children):
+        # a child job may close its own task (a failed link fetch, an unreadable sheet): never cancel / await the
+        # caller itself — awaiting a gather that contains the current task recursed until RecursionError and cut
+        # the cleanup short (2026-11-04 log)
+        me = asyncio.current_task()
+        others = [c for c in self._children if c is not me]
+        for child in others:
             child.cancel()
-        if self._children:
-            await asyncio.gather(*self._children, return_exceptions=True)
+        if others:
+            await asyncio.gather(*others, return_exceptions=True)
         sweep = status != "completed"  # a cancelled pool job may still write into the workdir (B-044)
         if self._keep:  # dump uploads still running: the workdir goes when they finish (user is not kept waiting)
             _detached(self._drain_then_remove(set(self._keep), sweep))
