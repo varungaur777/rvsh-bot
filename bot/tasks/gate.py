@@ -3,7 +3,7 @@
 The task lanes (``tasks.lanes``) queue the *outputs* (Marks, PDFs…). Work that happens while the user is still in
 the interactive flow also needs a queue, or a crowd would run it all at once:
 - ``prepare`` gate — after **Done**: download the files + parse the sheets (``queue.prepare_concurrent``, auto),
-- ``fetch`` gate — opening pasted links (``fetch.parallel_links``, 3): exam servers are slow and easily overloaded.
+- ``fetch`` gate — opening pasted links (``fetch.parallel_links``, 5): exam servers are slow and easily overloaded.
 
 Order: priority (owner 0 · admin 1 · user 2), then arrival. A waiting caller gets ``on_wait(position)`` when it
 starts waiting and whenever its position changes (the handler shows "⏳ You are #3 in the queue").

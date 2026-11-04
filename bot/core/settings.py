@@ -99,7 +99,7 @@ DEFAULTS: dict[str, Any] = {
     # mode: direct | remote | auto (tools/fetch_server) · engine: auto (wget if installed) | wget | aiohttp · concurrency: assets in flight
     # parallel_links: pasted links opened at once (tasks.gate "fetch"); more wait in a visible queue
     # other_language: EDQT pages — also fetch each question's other medium (Hindi/English version button)
-    "fetch": {"mode": "direct", "engine": "auto", "concurrency": 48, "parallel_links": 3, "other_language": True},
+    "fetch": {"mode": "direct", "engine": "auto", "concurrency": 48, "parallel_links": 5, "other_language": True},
 }
 
 
