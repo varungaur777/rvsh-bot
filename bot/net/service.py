@@ -6,7 +6,9 @@ Public API
 ----------
 - ``await fetch_url(app, url, progress=None, on_assets=None, light=False) -> list[Page]`` (engine: setting
   ``fetch.engine``; ``light``: the page(s) only, for ``/links``)
-  - ``fetch.mode = direct``: fetch from this machine (proxy: setting ``http.proxy`` or env ``HTTP_PROXY``).
+  - ``fetch.mode = direct``: fetch from this machine (proxy: setting ``http.proxy`` or env ``HTTP_PROXY``) — or,
+    when ``FETCH_RELAY_URL`` + ``FETCH_RELAY_TOKEN`` are set, through the Mumbai relay (``tools/vercel_relay``,
+    an Indian IP for a bot that runs abroad).
   - ``remote``: ask the fetch server (``FETCH_API_URL`` + ``FETCH_API_TOKEN``).
   - ``auto``: direct first; on a refusal (non-200, network error, non-exam page) use the server if configured.
 - ``await check_server(api_url, token) -> dict`` — ``/bot → config.env → 🧪 Test fetch server``: reachable?
@@ -36,6 +38,7 @@ async def fetch_url(app, url: str, progress=None, on_assets=None, *, light: bool
     mode = app.settings.get("fetch.mode") or "direct"
     api, token = app.config.fetch_api_url, app.config.fetch_api_token
     proxy = app.settings.get("http.proxy") or app.config.http_proxy or None
+    relay = (app.config.fetch_relay_url, app.config.fetch_relay_token) if app.config.fetch_relay_url else None
     if mode == "remote" and not api:
         mode = "direct"
     try:
@@ -46,7 +49,8 @@ async def fetch_url(app, url: str, progress=None, on_assets=None, *, light: bool
                                             other_language=bool(app.settings.get("fetch.other_language", True)),
                                             assets=not light,
                                             engine=app.settings.get("fetch.engine") or "auto",
-                                            concurrency=int(app.settings.get("fetch.concurrency") or 48))
+                                            concurrency=int(app.settings.get("fetch.concurrency") or 48),
+                                            relay=relay)
         except fetcher.FetchError as e:
             if mode == "auto" and api:
                 log.info("direct fetch refused (%s) — trying the remote fetch server", e.reason)

@@ -11,7 +11,8 @@
 # Needs (Settings → Secrets and variables → Actions → Secrets): BOT_TOKEN, API_ID, API_HASH, OWNER_ID,
 # DUMP_CHANNEL_ID, IMAGE_DUMP_CHANNEL_ID, BRANDING, IMAGE_BOT_TOKENS, MONGO_URL (required here: the runner's disk is
 # wiped after every job). Optional: QUIZ_DUMP_CHANNEL_ID, FORCE_SUB_CHANNELS, HTTP_PROXY, CLOUDFLARED_TOKEN,
-# WEBAPP_BASE_URL. Start: Actions → "bot" → Run workflow. Stop: cancel the run (and disable the workflow).
+# WEBAPP_BASE_URL, FETCH_RELAY_URL + FETCH_RELAY_TOKEN (exam links opened from India by the free Mumbai relay —
+# tools/vercel_relay/README.md), FETCH_API_URL + FETCH_API_TOKEN. Start: Actions → "bot" → Run workflow. Stop: cancel the run (and disable the workflow).
 
 name: bot
 
@@ -48,13 +49,19 @@ jobs:
           python-version: "3.13"
           cache: pip
 
+      # A slow Ubuntu mirror once held this step for 10+ min while no bot was running (2026-11-04): apt gives up
+      # on a stalled download after 30 s and retries; the step has a hard limit; if it still fails the bot starts
+      # anyway (Pango ships with the runner; OCR / Noto fonts are extras).
       - name: System packages (Tesseract Hindi + English, Pango, cloudflared)
         if: steps.gate.outputs.skip != '1'
+        timeout-minutes: 8
+        continue-on-error: true
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends tesseract-ocr tesseract-ocr-eng tesseract-ocr-hin \
+          APT="-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30"
+          sudo apt-get $APT update -q
+          sudo apt-get $APT install -y -q --no-install-recommends tesseract-ocr tesseract-ocr-eng tesseract-ocr-hin \
             libpango-1.0-0 libpangoft2-1.0-0 libharfbuzz-subset0 fonts-noto-core wget
-          sudo curl -fsSL -o /usr/local/bin/cloudflared \
+          sudo curl -fsSL --retry 3 --max-time 120 -o /usr/local/bin/cloudflared \
             https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
           sudo chmod +x /usr/local/bin/cloudflared
 
@@ -85,6 +92,10 @@ jobs:
           HTTP_PROXY: ${{ secrets.HTTP_PROXY }}
           CLOUDFLARED_TOKEN: ${{ secrets.CLOUDFLARED_TOKEN }}
           WEBAPP_BASE_URL: ${{ secrets.WEBAPP_BASE_URL }}
+          FETCH_RELAY_URL: ${{ secrets.FETCH_RELAY_URL }}
+          FETCH_RELAY_TOKEN: ${{ secrets.FETCH_RELAY_TOKEN }}
+          FETCH_API_URL: ${{ secrets.FETCH_API_URL }}
+          FETCH_API_TOKEN: ${{ secrets.FETCH_API_TOKEN }}
         run: |
           mkdir -p "$DOWNLOAD_ROOT" && touch "$ENV_FILE"
           # the next run, ~10 min before this one stops (the new bot takes over through the lease)
