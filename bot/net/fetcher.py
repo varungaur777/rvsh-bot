@@ -699,8 +699,9 @@ class _RelayDownloader(_HttpDownloader):
         """POST ``payload`` to the active relay, moving to the next one when a relay fails → (status, headers,
         body) of the last answer; the last relay's network error is raised (``NET_ERRORS``)."""
         n = len(self.relays)
+        start = self.active  # fixed for this call: _switch() moves self.active while we go round
         for k in range(n):
-            i = (self.active + k) % n
+            i = (start + k) % n
             url, token = self.relays[i]
             last = k == n - 1
             try:
@@ -712,11 +713,18 @@ class _RelayDownloader(_HttpDownloader):
                     raise
                 self._switch(i, type(e).__name__)
                 continue
-            relay_down = status in (401, 402, 403, 408, 429) or (
-                status >= 500 and "X-Relay-Status" not in headers and "X-Relay-Error" not in headers)
-            if relay_down and not last:
-                self._switch(i, f"HTTP {status}")
-                continue
+            # anything but our relay's own answer (it always sets X-Relay-Status / X-Relay-Error): Vercel itself
+            # refused — limit, firewall / bot challenge (2026-11-05: every call got a 422 HTML page), outage
+            ours = "X-Relay-Status" in headers or "X-Relay-Error" in headers
+            relay_down = status in (401, 402, 403, 408, 429) or (status != 200 and not ours)
+            if relay_down:
+                title = re.search(rb"<title>([^<]{0,120})</title>", data[:20000], re.I)
+                why = f"HTTP {status}" + (f" — {title.group(1).decode('utf-8', 'replace').strip()}" if title else "")
+                if not last:
+                    self._switch(i, why)
+                    continue
+                log.warning("relay %d of %d refused the call (%s; vercel id %s)", i + 1, n, why,
+                            headers.get("x-vercel-id", "?"))
             if i != self.active and not relay_down:
                 self.active = i
             return status, headers, data
@@ -737,7 +745,10 @@ class _RelayDownloader(_HttpDownloader):
         if status == 413:
             return _Resp(200, url, {}, None)  # over Vercel's 4.5 MB: treated like an over-cap answer
         if status != 200 or "X-Relay-Status" not in rheaders:  # relay / Vercel trouble: a network error
-            raise aiohttp.ClientError(f"relay answered {status}: {data[:200]!r}")
+            title = re.search(rb"<title>([^<]{0,120})</title>", data[:20000], re.I)
+            raise aiohttp.ClientError(f"relay answered {status}"
+                                      + (f" ({title.group(1).decode('utf-8', 'replace').strip()})" if title else "")
+                                      + f": {data[:200]!r}")
         pairs = json.loads(base64.b64decode(rheaders.get("X-Relay-Headers") or "W10="))
         return _Resp(int(rheaders["X-Relay-Status"]), url, _HeaderList(pairs), data)
 
