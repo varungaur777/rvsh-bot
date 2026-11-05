@@ -38,6 +38,7 @@ async def fetch_url(app, url: str, progress=None, on_assets=None, *, light: bool
     mode = app.settings.get("fetch.mode") or "direct"
     api, token = app.config.fetch_api_url, app.config.fetch_api_token
     proxy = app.settings.get("http.proxy") or app.config.http_proxy or None
+    # FETCH_RELAY_URL may list backups, comma-separated (FETCH_RELAY_TOKEN: one for all, or one per relay)
     relay = (app.config.fetch_relay_url, app.config.fetch_relay_token) if app.config.fetch_relay_url else None
     if mode == "remote" and not api:
         mode = "direct"
