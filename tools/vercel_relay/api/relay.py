@@ -19,6 +19,11 @@ Bot use (POST, header ``X-Token``):
   ``{"batch": [{"url", "headers"}, …]}`` → JSON ``{"items": [{"status", "ctype", "body": "<base64>"} |
   {"skip": true} | {"error": "…"}]}`` in the same order, fetched ``BATCH_THREADS`` at a time, redirects followed;
   items past the size budget come back as ``skip`` (the bot asks for those one by one).
+- an ASP.NET async-postback chain (EDQT "Hindi / English version" buttons — each click needs the view state the
+  previous reply returned, so they cannot run in parallel; 25 round trips abroad → Mumbai became one call):
+  ``{"aspnet_chain": {"url", "headers", "fields", "sm_id", "panel", "targets": […], "gap"}}`` → JSON
+  ``{"items": [{"status", "panels": ["<updatePanel html>", …]} | {"skip": true} | {"error": "…"}], "fields": {…},
+  "cookies": {…}}`` (``fields`` = the hidden fields after the last click, so the bot can go on with skipped ones).
 """
 
 from __future__ import annotations
@@ -26,6 +31,7 @@ from __future__ import annotations
 import base64
 import concurrent.futures
 import hmac
+from http.cookies import CookieError, SimpleCookie
 import json
 import os
 import ssl
@@ -40,6 +46,7 @@ TIMEOUT = 50  # Vercel stops the function at 60 s (vercel.json maxDuration)
 MAX_BODY = 4_400_000  # Vercel's response cap is 4.5 MB
 BATCH_BUDGET = 3_000_000  # raw bytes per batch answer (base64 + JSON must stay under 4.5 MB)
 BATCH_MAX, BATCH_THREADS, BATCH_ITEM_TIMEOUT = 48, 16, 15
+CHAIN_MAX, CHAIN_ITEM_TIMEOUT, CHAIN_DEADLINE = 60, 15, 45  # postback chain: clicks · s per click · s in all
 BATCH_DEADLINE = 42  # s: items not started by then come back as skip (the function must answer within 60 s)
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
       "Chrome/130.0.0.0 Safari/537.36")
@@ -121,6 +128,8 @@ class handler(BaseHTTPRequestHandler):
             job = json.loads(self.rfile.read(n) or b"{}")
             if isinstance(job.get("batch"), list):
                 return self._batch(job["batch"])
+            if isinstance(job.get("aspnet_chain"), dict):
+                return self._chain(job["aspnet_chain"])
             method = str(job.get("method") or "GET").upper()
             url = str(job["url"])
             headers = {str(k): str(v) for k, v in (job.get("headers") or {}).items()}
@@ -176,3 +185,76 @@ class handler(BaseHTTPRequestHandler):
             out.append(r)
         out += [{"skip": True}] * (len(items) - len(jobs))
         return self._send(200, json.dumps({"items": out}).encode(), "application/json")
+
+    def _chain(self, job: dict) -> None:
+        try:
+            url = str(job["url"])
+            headers = {str(k): str(v) for k, v in (job.get("headers") or {}).items()}
+            fields = {str(k): str(v) for k, v in (job.get("fields") or {}).items()}
+            sm_id, panel = str(job["sm_id"]), str(job["panel"])
+            targets = [str(t) for t in (job.get("targets") or [])][:CHAIN_MAX]
+            gap = min(max(float(job.get("gap") or 0), 0), 2)
+        except (KeyError, TypeError, ValueError) as e:
+            return self._send(400, f"bad chain: {e}".encode())
+        if not url.lower().startswith(("http://", "https://")):
+            return self._send(400, b"url must be http(s)")
+        cookies: dict[str, str] = {}
+        for part in headers.pop("Cookie", "").split(";"):
+            k, sep, v = part.strip().partition("=")
+            if sep:
+                cookies[k] = v
+        deadline = time.monotonic() + CHAIN_DEADLINE
+        items = []
+        for target in targets:
+            if time.monotonic() > deadline:
+                items.append({"skip": True})
+                continue
+            form = {**fields, sm_id: f"{panel}|{target}", "__EVENTTARGET": target, "__EVENTARGUMENT": "",
+                    "__ASYNCPOST": "true"}
+            h = dict(headers)
+            h["Content-Type"] = "application/x-www-form-urlencoded; charset=UTF-8"
+            if cookies:
+                h["Cookie"] = "; ".join(f"{k}={v}" for k, v in cookies.items())
+            try:
+                status, rh, data = _open(_PLAIN, "POST", url, h, urllib.parse.urlencode(form).encode(), CHAIN_ITEM_TIMEOUT)
+            except Exception as e:  # noqa: BLE001 — this click only; the bot retries it alone
+                items.append({"error": type(e).__name__})
+                continue
+            for k, v in rh:
+                if k.lower() == "set-cookie":
+                    c = SimpleCookie()
+                    try:
+                        c.load(v)
+                    except CookieError:
+                        continue
+                    cookies.update({name: m.value for name, m in c.items()})
+            panels = []
+            if status == 200:
+                for typ, ident, content in _parse_delta(data.decode("utf-8", "replace")):
+                    if typ == "hiddenField":
+                        fields[ident] = content  # the next click carries the fresh view state
+                    elif typ == "updatePanel":
+                        panels.append(content)
+            items.append({"status": status, "panels": panels})
+            if gap:
+                time.sleep(gap)
+        items += [{"skip": True}] * (len(job.get("targets") or []) - len(targets))
+        return self._send(200, json.dumps({"items": items, "fields": fields, "cookies": cookies}).encode(),
+                          "application/json")
+
+
+def _parse_delta(text: str) -> list[tuple[str, str, str]]:
+    """ASP.NET AJAX partial-postback reply ``length|type|id|content|…`` → ``[(type, id, content)]``."""
+    out, i = [], 0
+    while i < len(text):
+        j = text.find("|", i)
+        if j < 0 or not text[i:j].isdigit():
+            break
+        n = int(text[i:j])
+        k = text.find("|", j + 1)
+        l = text.find("|", k + 1)
+        if k < 0 or l < 0:
+            break
+        out.append((text[j + 1:k], text[k + 1:l], text[l + 1:l + 1 + n]))
+        i = l + 1 + n + 1
+    return out
