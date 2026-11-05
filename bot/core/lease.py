@@ -9,7 +9,9 @@ Public API
 
 Mechanics: document ``_lease/main`` = ``{holder, host, pid, started_at, heartbeat, handover}``. A lease is
 free when absent, held by us, its heartbeat is older than ``stale_s`` (90 s), or its holder was a process on
-this host that no longer exists (crash/kill → immediate takeover). A new instance that finds a
+this host that no longer exists (crash/kill → immediate takeover). "This host" = host name **+ boot time**: GitHub
+runners reuse host names across different machines, and a new run once took a live run's lease as "dead"
+(2026-11-04, ping-pong until no bot was left). A new instance that finds a
 live holder writes ``handover = <its id>``; the holder's heartbeat loop sees it and shuts down gracefully,
 releasing the lease. Without Mongo the lease is skipped (logged) — single-host development.
 """
@@ -28,6 +30,14 @@ import psutil
 from pymongo.errors import DuplicateKeyError, PyMongoError
 
 log = logging.getLogger(__name__)
+
+
+def _host_id() -> str:
+    """Host name + boot time: unique per machine even where host names repeat (GitHub Actions runners)."""
+    try:
+        return f"{socket.gethostname()}#{int(psutil.boot_time())}"
+    except Exception:  # pragma: no cover
+        return socket.gethostname()
 
 
 class Lease:
@@ -53,7 +63,7 @@ class Lease:
             now = time.time()
             try:
                 cur = await coll.find_one({"_id": "main"})
-                dead_local = bool(cur and cur.get("host") == socket.gethostname() and cur.get("pid")
+                dead_local = bool(cur and cur.get("host") == _host_id() and cur.get("pid")
                                   and not psutil.pid_exists(int(cur["pid"])))
                 flt = {"_id": "main"} if dead_local else                     {"_id": "main", "$or": [{"holder": self.me}, {"heartbeat": {"$lt": now - self.stale_s}}]}
                 if dead_local:
@@ -83,7 +93,7 @@ class Lease:
             await asyncio.sleep(5)
 
     def _fields(self, now: float) -> dict:
-        return {"holder": self.me, "host": socket.gethostname(), "pid": os.getpid(), "heartbeat": now,
+        return {"holder": self.me, "host": _host_id(), "pid": os.getpid(), "heartbeat": now,
                 "started_at": now, "handover": None}
 
     def start_heartbeat(self, on_lost: Callable[[str], Awaitable[None]]) -> None:

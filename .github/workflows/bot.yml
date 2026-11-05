@@ -6,7 +6,9 @@
 # How it keeps going: one job runs the bot for up to ~5 h 40 min (GitHub ends a job at 6 h). At ~5 h 30 min the job
 # starts the next run of this workflow; the new bot asks the old one to hand over (MongoDB instance lease) and the
 # old one stops gracefully. The bot also stops by itself after 340 min (profile github_actions). A schedule every
-# 6 h starts a run only when none is running (a missed hand-over).
+# hour starts a run only when none is running (a missed hand-over; GitHub sometimes skips scheduled runs, and on
+# 2026-11-04 the bot was offline 2.5 h waiting for the 6-hourly one). An older run never restarts its bot once a
+# newer run exists, and never chains a new run then (the two used to take the lease from each other).
 #
 # Needs (Settings → Secrets and variables → Actions → Secrets): BOT_TOKEN, API_ID, API_HASH, OWNER_ID,
 # DUMP_CHANNEL_ID, IMAGE_DUMP_CHANNEL_ID, BRANDING, IMAGE_BOT_TOKENS, MONGO_URL (required here: the runner's disk is
@@ -19,7 +21,7 @@ name: bot
 on:
   workflow_dispatch:
   schedule:
-    - cron: "17 */6 * * *"
+    - cron: "17 * * * *"
 
 permissions:
   actions: write   # start the next run
@@ -98,12 +100,17 @@ jobs:
           FETCH_API_TOKEN: ${{ secrets.FETCH_API_TOKEN }}
         run: |
           mkdir -p "$DOWNLOAD_ROOT" && touch "$ENV_FILE"
-          # the next run, ~10 min before this one stops (the new bot takes over through the lease)
-          ( sleep $((330 * 60)) && gh workflow run bot.yml -R "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" ) &
+          # runs of this workflow started after this one and still going (0 when gh fails: keep the old behaviour)
+          newer() { gh run list -R "$GITHUB_REPOSITORY" --workflow bot.yml --status in_progress --json databaseId \
+                      --jq "map(select(.databaseId > $GITHUB_RUN_ID)) | length" 2>/dev/null || echo 0; }
+          # the next run, ~10 min before this one stops (the new bot takes over through the lease) — unless a newer
+          # run is already going
+          ( sleep $((330 * 60)) && [ "$(newer)" = 0 ] && gh workflow run bot.yml -R "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" ) &
           crashes=0
           while true; do
             code=0; python -m bot || code=$?
             echo "bot exited with $code"
+            if [ "$(newer)" != 0 ]; then echo "a newer run is going - not restarting"; code=0; break; fi
             if [ "$code" = 3 ]; then continue; fi            # /update: start the new code
             if [ "$code" = 1 ] && [ "$crashes" -lt 3 ]; then crashes=$((crashes + 1)); sleep 20; continue; fi
             break                                            # 0 = stopped / handed over, 2 = bad settings
