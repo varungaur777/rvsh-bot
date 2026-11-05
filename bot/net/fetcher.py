@@ -406,7 +406,28 @@ async def _other_language(dl: "_Downloader", page_url: str, html: bytes, progres
     per_q: list[list[str]] = []
     headers = {"X-MicrosoftAjax": "Delta=true", "X-Requested-With": "XMLHttpRequest", "Referer": page_url,
                "Cache-Control": "no-cache"}
+
+    def other_imgs(panels) -> list[str]:
+        return [urljoin(page_url, unescape(s)) for content in panels for s in _IMG_SRC.findall(content)
+                if (m := _SRC_LANG.search(s)) and m.group(1).upper() not in own]
+
+    ahead: dict[str, list[str]] = {}  # target → images, from one relay call for the whole page (Mumbai relay)
+    chain = getattr(dl, "aspnet_chain", None)
+    if chain is not None:
+        async with gate:
+            got = await chain(post_url, headers, fields, sm_id, panel, targets, OTHER_LANG_GAP_S)
+        if got is not None:
+            items, new_fields = got
+            fields.update(new_fields)
+            for target, it in zip(targets, items):
+                if it.get("status") == 200:
+                    ahead[target] = other_imgs(it.get("panels") or [])
+            if progress:
+                progress(f"other language: {len(ahead)}/{len(targets)} questions")
     for n, target in enumerate(targets, 1):
+        if target in ahead:
+            per_q.append(list(dict.fromkeys(ahead[target])))
+            continue
         form = {**fields, sm_id: f"{panel}|{target}", "__EVENTTARGET": target, "__EVENTARGUMENT": "", "__ASYNCPOST": "true"}
         imgs: list[str] = []
         try:
@@ -706,6 +727,27 @@ class _RelayDownloader(_HttpDownloader):
                 method, body = "GET", None
                 extra.pop("Content-Type", None)
         raise aiohttp.ClientError("too many redirects")
+
+    async def aspnet_chain(self, url: str, headers: dict, fields: dict, sm_id: str, panel: str, targets: list[str],
+                           gap: float) -> tuple[list[dict], dict] | None:
+        """All of a page's other-language clicks in **one** relay call (each click needs the view state of the
+        previous reply, so they run one after another — in Mumbai, not across the ocean 25 times). → (items, final
+        hidden fields), or None when the relay cannot (an older relay without chain mode): the caller clicks one by
+        one."""
+        job = {"aspnet_chain": {"url": url, "headers": self._headers(url, headers), "fields": fields, "sm_id": sm_id,
+                                "panel": panel, "targets": targets, "gap": gap}}
+        try:
+            async with self.s.post(self.relay_url, json=job) as r:
+                if r.status != 200:
+                    return None
+                got = await r.json(content_type=None)
+        except (*NET_ERRORS, ValueError) as e:
+            log.info("relay chain failed (%s) — clicking one by one", type(e).__name__)
+            return None
+        host = urlsplit(url).hostname or ""
+        self.jar.setdefault(host, {}).update({str(k): str(v) for k, v in (got.get("cookies") or {}).items()})
+        items = got.get("items")
+        return (items, got.get("fields") or {}) if isinstance(items, list) else None
 
     async def _download(self, urls: list[str], referer: str) -> None:
         chunks = [urls[i:i + RELAY_BATCH] for i in range(0, len(urls), RELAY_BATCH)]
