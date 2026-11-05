@@ -259,8 +259,12 @@ def _track_lag(app, update) -> None:
     except (AttributeError, OSError, ValueError):
         return
     app.max_update_lag = max(app.max_update_lag, lag)
-    if lag > 3:
-        log.warning("update handled %.1fs after it was sent (chat %s)", lag, getattr(getattr(update, "chat", None), "id", "?"))
+    if lag > 3:  # with the loop's own peak lag and Kurigram's update queue: inside the bot, or before it arrived?
+        loop_ms = getattr(getattr(app, "looplag", None), "max_ms", 0.0)
+        queued = getattr(getattr(getattr(app, "client", None), "dispatcher", None), "updates_queue", None)
+        log.warning("update handled %.1fs after it was sent (chat %s) · loop peak %.0f ms · %s updates waiting",
+                    lag, getattr(getattr(update, "chat", None), "id", "?"), loop_ms,
+                    queued.qsize() if queued is not None else "?")
 
 
 async def _deny(app, update, text: str) -> None:

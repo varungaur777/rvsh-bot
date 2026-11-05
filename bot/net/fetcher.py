@@ -301,7 +301,8 @@ async def _pack(dl: "_Downloader", page_url: str, html: bytes, kind: str, sectio
         extra = [u for u in _css_urls(css_url, body) if u not in got]  # Chrome also saves only what is used
         got.update(zip(extra, await dl.get_many(extra, css_url)))
     results = [(u, r[0], r[1]) for u, r in got.items() if r]
-    mht = build_mht(page_url, text.encode(charset, "replace"), results, charset)
+    # ~700 images base64-encoded into one archive: off the event loop (a rush packs many sheets at once)
+    mht = await asyncio.to_thread(build_mht, page_url, text.encode(charset, "replace"), results, charset)
     return Page(url=page_url, kind=kind, mht=mht, section=section, assets=len(results), missing=missing, engine=dl.name)
 
 
@@ -448,7 +449,7 @@ async def _other_language(dl: "_Downloader", page_url: str, html: bytes, progres
         await asyncio.sleep(OTHER_LANG_GAP_S)
     if not any(per_q):
         return html
-    new_text, done = _inject_other_language(text, per_q)
+    new_text, done = await asyncio.to_thread(_inject_other_language, text, per_q)  # big page, regex work: off the loop
     log.info("edqt other language: %d/%d questions added for %s", done, len(targets), redact(page_url))
     return new_text.encode(charset, "replace") if done else html
 
