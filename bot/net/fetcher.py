@@ -649,19 +649,21 @@ class _RelayDownloader(_HttpDownloader):
     IP) — for a bot that runs abroad, where exam sites answer 403. The relay makes the request and returns the answer
     unchanged; this side keeps the cookies (ASP.NET session for the other-language postbacks) and follows redirects,
     so the retry / back-off logic of ``_HttpDownloader`` applies as-is. Assets go ``RELAY_BATCH`` per call (a sheet's
-    ~500 images in ~13 calls — the free plan counts calls); what a batch misses is fetched one by one."""
+    ~500 images in ~13 calls — the free plan counts calls); what a batch misses is fetched one by one.
+    **Several relays** (main + backups): each call goes to the one that last worked; a relay that is down, over its
+    limit or refuses the token (no answer / 401 · 402 · 403 · 429 · Vercel 5xx) → the next one, at once. The relay's
+    own "the exam site did not answer from Mumbai" (502 + ``X-Relay-Error``) is an answer, not a relay failure."""
 
-    def __init__(self, relay: tuple[str, str], *args) -> None:
+    def __init__(self, relay, *args) -> None:
         super().__init__(*args, chrome=False)
-        self.relay_url, self.relay_token = relay[0].rstrip("/"), relay[1]
-        if not self.relay_url.endswith("/api/relay"):
-            self.relay_url += "/api/relay"
+        self.relays = [(_relay_endpoint(u), t) for u, t in _relay_list(relay)]
+        self.active = 0
         self.http = "relay"
         self.jar: dict[str, dict[str, str]] = {}  # host → cookie name → value
 
     async def __aenter__(self):
         tmo = aiohttp.ClientTimeout(total=None, sock_connect=self.timeout, sock_read=90)
-        self.s = aiohttp.ClientSession(timeout=tmo, headers={"X-Token": self.relay_token})
+        self.s = aiohttp.ClientSession(timeout=tmo)
         self.sem = _Limiter(self.concurrency)
         self.batches = asyncio.Semaphore(RELAY_PARALLEL_BATCHES)
         return self
@@ -692,19 +694,51 @@ class _RelayDownloader(_HttpDownloader):
             for k, m in c.items():
                 self.jar.setdefault(host, {})[k] = m.value
 
+    async def _call(self, payload: dict):
+        """POST ``payload`` to the active relay, moving to the next one when a relay fails → (status, headers,
+        body) of the last answer; the last relay's network error is raised (``NET_ERRORS``)."""
+        n = len(self.relays)
+        for k in range(n):
+            i = (self.active + k) % n
+            url, token = self.relays[i]
+            last = k == n - 1
+            try:
+                async with self.s.post(url, json=payload, headers={"X-Token": token}) as r:
+                    data = await r.read()
+                    status, headers = r.status, r.headers
+            except NET_ERRORS as e:
+                if last:
+                    raise
+                self._switch(i, type(e).__name__)
+                continue
+            relay_down = status in (401, 402, 403, 408, 429) or (
+                status >= 500 and "X-Relay-Status" not in headers and "X-Relay-Error" not in headers)
+            if relay_down and not last:
+                self._switch(i, f"HTTP {status}")
+                continue
+            if i != self.active and not relay_down:
+                self.active = i
+            return status, headers, data
+        raise aiohttp.ClientError("no relay")  # pragma: no cover (n ≥ 1)
+
+    def _switch(self, i: int, why: str) -> None:
+        nxt = (i + 1) % len(self.relays)
+        if self.active == i:
+            log.warning("relay %d of %d failed (%s) — using relay %d", i + 1, len(self.relays), why, nxt + 1)
+            self.active = nxt
+
     async def _relay_one(self, method: str, url: str, headers: dict, body: bytes | None) -> _Resp:
         job = {"method": method, "url": url, "headers": headers,
                "body": base64.b64encode(body).decode() if body else None}
-        async with self.s.post(self.relay_url, json=job) as r:
-            data = await r.read()
-            if r.status == 401:
-                raise FetchError("remote", 401, "the relay refused the token (FETCH_RELAY_TOKEN ≠ RELAY_TOKEN)")
-            if r.status == 413:
-                return _Resp(200, url, {}, None)  # over Vercel's 4.5 MB: treated like an over-cap answer
-            if r.status != 200 or "X-Relay-Status" not in r.headers:  # relay / Vercel trouble: a network error
-                raise aiohttp.ClientError(f"relay answered {r.status}: {data[:200]!r}")
-            pairs = json.loads(base64.b64decode(r.headers.get("X-Relay-Headers") or "W10="))
-            return _Resp(int(r.headers["X-Relay-Status"]), url, _HeaderList(pairs), data)
+        status, rheaders, data = await self._call(job)
+        if status == 401:
+            raise FetchError("remote", 401, "the relay refused the token (FETCH_RELAY_TOKEN ≠ RELAY_TOKEN)")
+        if status == 413:
+            return _Resp(200, url, {}, None)  # over Vercel's 4.5 MB: treated like an over-cap answer
+        if status != 200 or "X-Relay-Status" not in rheaders:  # relay / Vercel trouble: a network error
+            raise aiohttp.ClientError(f"relay answered {status}: {data[:200]!r}")
+        pairs = json.loads(base64.b64decode(rheaders.get("X-Relay-Headers") or "W10="))
+        return _Resp(int(rheaders["X-Relay-Status"]), url, _HeaderList(pairs), data)
 
     async def _send(self, method: str, url: str, *, headers: dict | None = None, data: dict | None = None,
                     cap: int | None = None) -> _Resp:
@@ -737,10 +771,10 @@ class _RelayDownloader(_HttpDownloader):
         job = {"aspnet_chain": {"url": url, "headers": self._headers(url, headers), "fields": fields, "sm_id": sm_id,
                                 "panel": panel, "targets": targets, "gap": gap}}
         try:
-            async with self.s.post(self.relay_url, json=job) as r:
-                if r.status != 200:
-                    return None
-                got = await r.json(content_type=None)
+            status, _h, data = await self._call(job)
+            if status != 200:
+                return None
+            got = json.loads(data)
         except (*NET_ERRORS, ValueError) as e:
             log.info("relay chain failed (%s) — clicking one by one", type(e).__name__)
             return None
@@ -758,8 +792,8 @@ class _RelayDownloader(_HttpDownloader):
         async with self.batches:
             try:
                 items = [{"url": u, "headers": self._headers(u, {"Referer": referer})} for u in urls]
-                async with self.s.post(self.relay_url, json={"batch": items}) as r:
-                    got = (await r.json(content_type=None)).get("items") if r.status == 200 else None
+                status, _h, data = await self._call({"batch": items})
+                got = json.loads(data).get("items") if status == 200 else None
                 missed = []
                 for u, it in zip(urls, got or []):
                     if it.get("status") == 200 and "body" in it:
@@ -774,6 +808,23 @@ class _RelayDownloader(_HttpDownloader):
                 missed = list(urls)
         if missed:  # one by one, with the usual retries / back-off
             await asyncio.gather(*(self._one(u, referer) for u in missed))
+
+
+def _relay_list(relay) -> list[tuple[str, str]]:
+    """``(url, token)`` or a list of them; a url / token may also list several, comma-separated (one token = for
+    all)."""
+    pairs = [relay] if isinstance(relay, tuple) and len(relay) == 2 and isinstance(relay[0], str) else list(relay)
+    out = []
+    for urls, tokens in pairs:
+        us = [u.strip() for u in str(urls).split(",") if u.strip()]
+        ts = [t.strip() for t in str(tokens or "").split(",")] or [""]
+        out += [(u, ts[j] if j < len(ts) else ts[0]) for j, u in enumerate(us)]
+    return out
+
+
+def _relay_endpoint(url: str) -> str:
+    url = url.rstrip("/")
+    return url if url.endswith("/api/relay") else url + "/api/relay"
 
 
 class _HeaderList(dict):

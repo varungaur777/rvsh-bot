@@ -53,6 +53,17 @@ only if the relay fails and one is set). **Remote** skips the relay.
 How the bot uses it: pages and the other-language postbacks one request per call (cookies and redirects kept by
 the bot); a sheet's images ~40 per call — about 15 calls per sheet.
 
+## 5. Backup relay (optional)
+Vercel → **Add New… → Project** → import **`rvsh-relay`** again → Project Name **`rvsh-relay-2`** → Environment
+Variable `RELAY_TOKEN` = **the same token** → Deploy. Then the bot secret:
+
+`FETCH_RELAY_URL` = `https://rvsh-relay.vercel.app,https://rvsh-relay-2.vercel.app` (comma, no spaces needed)
+
+The bot uses the first; when it is down, over its limit or refuses the token it moves to the next at once (and
+logs `relay 1 of 2 failed … — using relay 2`). Different tokens per relay: `FETCH_RELAY_TOKEN` = `tok1,tok2`.
+Note: projects of one Vercel account share that account's free allowance — a backup in the same account helps when
+a deployment breaks, not when the allowance is used up.
+
 ## Limits (Vercel Hobby)
 60 s per request, 4.5 MB per answer (one page or one image — fine for exam sheets), a monthly free allowance of
 function time and traffic, and personal / non-commercial use under Vercel's terms.
