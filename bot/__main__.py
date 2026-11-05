@@ -7,6 +7,9 @@ After ``/update`` the new code needs a **new process**: under a supervisor (syst
 ``/.dockerenv``, or ``RVSH_SUPERVISED=1``) the bot exits with 3 and is started again; run by hand, it starts its
 successor (same command, same folder) and exits.
 Exit codes: 0 normal stop · 1 boot failure · 2 configuration error · 3 restart me (code updated).
+Stopped because another instance took over (handover / lease taken) → always 0, even if the shutdown itself
+failed: a supervisor that restarts on 1 would start this old copy again, and it would take the lease back from the
+new one (2026-11-04: GitHub Actions runs fought until none was left).
 """
 
 from __future__ import annotations
@@ -36,8 +39,10 @@ def main() -> int:
 
     from bot.app import App
 
+    current: dict = {}
+
     async def run() -> tuple[bool, bool]:
-        app = App(config, runtime)
+        app = current["app"] = App(config, runtime)
         try:
             await app.start()
         except Exception:
@@ -56,12 +61,17 @@ def main() -> int:
         except KeyboardInterrupt:
             return 0
         except Exception:
-            return 1
+            return 0 if _taken_over(current.get("app")) else 1
         if updated:
             return relaunch()
         if not restart:
             return 0
         config = load_config()  # pick up .env changes made through /bot
+
+
+def _taken_over(app) -> bool:
+    reason = getattr(app, "stop_reason", "") or ""
+    return reason.startswith(("handover requested", "lease taken"))
 
 
 def relaunch() -> int:
