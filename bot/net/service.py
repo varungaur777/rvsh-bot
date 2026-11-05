@@ -11,6 +11,7 @@ Public API
     an Indian IP for a bot that runs abroad).
   - ``remote``: ask the fetch server (``FETCH_API_URL`` + ``FETCH_API_TOKEN``).
   - ``auto``: direct first; on a refusal (non-200, network error, non-exam page) use the server if configured.
+- ``await check_relays(urls, tokens) -> [{"host", "ok", "detail"}]`` — boot check of each Mumbai relay (Indian IP?).
 - ``await check_server(api_url, token) -> dict`` — ``/bot → config.env → 🧪 Test fetch server``: reachable?
   token right? (``GET /health``, then ``POST /fetch`` with a non-exam URL: 400 = token accepted, 401 = wrong;
   no exam site is opened). ``{"ok", "step": "url" | "reach" | "token" | "done", "detail", "busy", "ms"}``.
@@ -22,8 +23,10 @@ Exceptions → outcome: ``SourceUnavailable`` (key ``source_unavailable``) → t
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
+from urllib.parse import urlsplit
 
 import aiohttp
 
@@ -62,6 +65,32 @@ async def fetch_url(app, url: str, progress=None, on_assets=None, *, light: bool
     except fetcher.FetchError as e:
         log.info("fetch failed (%s, status %s) for %s: %s", e.reason, e.status, fetcher.redact(url), e.detail[:200])
         raise SourceUnavailable(detail=f"{e.reason} status={e.status} {e.detail}"[:300], reason=e.reason) from e
+
+
+async def check_relays(url_list: str, token_list: str, timeout: float = 20) -> list[dict]:
+    """Boot check of every Mumbai relay (2026-11-05: a wrong FETCH_RELAY_URL — a GitHub page — failed every link
+    for hours, silently). ``GET <relay>/api/relay?token=…&ip=1`` must answer JSON with ``country``.
+    → ``[{"host", "ok", "detail"}]`` (host only: the token never goes to a log)."""
+    out = []
+    for url, token in fetcher._relay_list((url_list, token_list)):
+        endpoint = fetcher._relay_endpoint(url)
+        host = (urlsplit(endpoint).hostname or endpoint)[:80]
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout)) as s:
+                async with s.get(endpoint, params={"token": token, "ip": "1"}) as r:
+                    body = await r.read()
+            if r.status == 200:
+                info = json.loads(body)
+                where = f"{info.get('city', '?')}, {info.get('country', '?')}"
+                out.append({"host": host, "ok": info.get("country") == "IN", "detail": where})
+            else:
+                why = {401: "token refused (FETCH_RELAY_TOKEN ≠ RELAY_TOKEN)"}.get(r.status, f"HTTP {r.status}")
+                if r.status != 401 and not host.endswith(".vercel.app"):
+                    why += " — is this really the relay's address?"
+                out.append({"host": host, "ok": False, "detail": why})
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as e:
+            out.append({"host": host, "ok": False, "detail": type(e).__name__})
+    return out
 
 
 async def check_server(api: str, token: str, timeout: float = 15) -> dict:

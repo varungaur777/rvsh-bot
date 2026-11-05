@@ -185,6 +185,7 @@ class App:
             self.compute.warm()
         spawn(self._results_catalogue(), "results-catalogue")
         spawn(self._check_forcesub(), "forcesub-check")
+        spawn(self._check_relays(), "relay-check")
         spawn(self.quiz.boot_notify(), "quiz-boot-notice")  # chats whose quiz the last stop interrupted
         from bot.exam.batch import boot_notice
         spawn(boot_notice(self), "batch-resume-notice")  # /batch runs a restart cut short → "Resume?"
@@ -402,6 +403,21 @@ class App:
 
     def _mongo_state(self, healthy: bool, replayed: int) -> None:
         self.dump.notify(f"🗄 Mongo {'back online ✅ (replayed ' + str(replayed) + ' ops)' if healthy else 'unreachable ❌ — serving from JSON'}")
+
+    async def _check_relays(self) -> None:
+        """Every Mumbai relay answers from India? Logged, and a problem goes to the dump (owner sees it at once)."""
+        if not self.config.fetch_relay_url:
+            return
+        from bot.net.service import check_relays
+        res = await check_relays(self.config.fetch_relay_url, self.config.fetch_relay_token)
+        for r in res:
+            (log.info if r["ok"] else log.warning)("relay %s: %s — %s", r["host"], "ok" if r["ok"] else "NOT working",
+                                                   r["detail"])
+        bad = [r for r in res if not r["ok"]]
+        if bad:
+            lines = "\n".join(f"• <code>{html.escape(r['host'])}</code> — {html.escape(r['detail'])}" for r in bad)
+            self.dump.notify(f"⚠️ <b>Mumbai relay problem</b> ({len(bad)} of {len(res)})\n{lines}\n"
+                             "<i>Check the GitHub secrets FETCH_RELAY_URL / FETCH_RELAY_TOKEN.</i>")
 
     async def _lease_lost(self, reason: str) -> None:
         log.warning("stopping: %s", reason)
